@@ -1,3 +1,5 @@
+![Umbrella Ranked cover](assets/cover.png)
+
 # Umbrella Ranked
 
 Native CounterStrikeSharp ranked system for CS2.
