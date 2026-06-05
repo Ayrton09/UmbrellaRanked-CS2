@@ -160,5 +160,5 @@ Main components:
 - Steam IDs are stored as Steam2-style strings.
 - Competitive stats require `MinimumPlayersForStats`; playtime does not.
 - Disabled map patterns pause competitive ranking only; playtime continues.
-- The plugin targets CounterStrikeSharp `1.0.369` and `.NET 10`.
+- The plugin targets CounterStrikeSharp `1.0.369 or newer` and `.NET 10`.
 - Additional SourceMod-to-CounterStrikeSharp notes are in [MIGRATION.md](MIGRATION.md).
