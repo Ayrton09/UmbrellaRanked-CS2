@@ -1,0 +1,39 @@
+# Build output
+bin/
+obj/
+
+# Local deploy/package output
+deploy/
+*.zip
+*.7z
+*.rar
+
+# Local CounterStrikeSharp runtime copies
+addons/
+runtimes/
+
+# Server/local data
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and crash dumps
+logs/
+*.log
+*.dmp
+
+# User/editor files
+.vs/
+.vscode/
+*.user
+*.suo
+*.tmp
+*.bak
+
+# OS metadata
+Thumbs.db
+Desktop.ini

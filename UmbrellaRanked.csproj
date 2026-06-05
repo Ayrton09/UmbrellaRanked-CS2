@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>umbrellaranked</AssemblyName>
+    <RootNamespace>UmbrellaRanked</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.369" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Dapper" Version="2.1.72" />
+    <PackageReference Include="MySqlConnector" Version="2.5.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.7" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.11" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.11" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.11" PrivateAssets="all" ExcludeAssets="all" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_Data_Sqlite_Core)\lib\net8.0\Microsoft.Data.Sqlite.dll" Link="sqlite\Microsoft.Data.Sqlite.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_bundle_e_sqlite3)\lib\netstandard2.0\SQLitePCLRaw.batteries_v2.dll" Link="sqlite\SQLitePCLRaw.batteries_v2.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_core)\lib\netstandard2.0\SQLitePCLRaw.core.dll" Link="sqlite\SQLitePCLRaw.core.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_provider_e_sqlite3)\lib\net6.0\SQLitePCLRaw.provider.e_sqlite3.dll" Link="sqlite\SQLitePCLRaw.provider.e_sqlite3.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\linux-x64\native\libe_sqlite3.so" Link="sqlite\libe_sqlite3.so" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\win-x64\native\e_sqlite3.dll" Link="sqlite\e_sqlite3.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\linux-x64\native\libe_sqlite3.so" Link="sqlite\runtimes\linux-x64\native\libe_sqlite3.so" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\win-x64\native\e_sqlite3.dll" Link="sqlite\runtimes\win-x64\native\e_sqlite3.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="lang\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="samples\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

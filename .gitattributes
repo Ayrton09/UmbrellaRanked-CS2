@@ -1,0 +1,11 @@
+* text=auto
+
+*.cs text eol=crlf
+*.json text eol=crlf
+*.md text eol=crlf
+*.csproj text eol=crlf
+
+*.dll binary
+*.pdb binary
+*.so binary
+*.zip binary

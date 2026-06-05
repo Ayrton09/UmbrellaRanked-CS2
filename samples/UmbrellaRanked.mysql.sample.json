@@ -1,0 +1,66 @@
+﻿{
+  "ConfigVersion": 1,
+  "Enabled": true,
+  "DatabaseMode": "MySql",
+  "MinimumKillsRequired": 100,
+  "MinimumPlayersForStats": 4,
+  "DisabledRankMapPatterns": [
+    "surf_*",
+    "mg_*",
+    "bhop_*",
+    "jb_*",
+    "dr_*",
+    "deathrun_*"
+  ],
+  "RankingMode": "Points",
+  "Points": {
+    "Kill": 2,
+    "HeadshotBonus": 1,
+    "KnifeKillBonus": 3,
+    "TaserKillBonus": 2,
+    "Assist": 1,
+    "DeathPenalty": 2,
+    "SuicidePenalty": 3,
+    "TeamKillPenalty": 5,
+    "Mvp": 1,
+    "BombPlant": 2,
+    "BombDefuse": 3,
+    "BombExplode": 3,
+    "HostageRescue": 3,
+    "TeamWin": 1,
+    "TeamLossPenalty": 1
+  },
+  "CommandCooldownSeconds": 3.0,
+  "AutosaveIntervalSeconds": 120.0,
+  "PruneInactiveDays": 35,
+  "PruneOnStartup": false,
+  "PruneCheckIntervalHours": 6.0,
+  "AllowResetRank": true,
+  "ResetRankCooldownDays": 30,
+  "TopAnnouncementThreshold": 5,
+  "LeaderboardLimit": 50,
+  "TopCacheSeconds": 20.0,
+  "MySql": {
+    "Host": "127.0.0.1",
+    "Port": 3306,
+    "Database": "umbrella_ranked",
+    "Username": "root",
+    "Password": "replace-with-a-real-password",
+    "ConnectionTimeoutSeconds": 15,
+    "MinimumPoolSize": 0,
+    "MaximumPoolSize": 50
+  },
+  "Sqlite": {
+    "FilePath": "data/umbrella_ranked.sqlite",
+    "BusyTimeoutSeconds": 5,
+    "UseWriteAheadLogging": true
+  },
+  "Top1Sound": {
+    "PlaybackMode": "ClientCommand",
+    "Value": "sounds/training/bell_normal.vsnd_c",
+    "ResourcePath": "",
+    "Volume": 0.3,
+    "Pitch": 0.0
+  }
+}
+
