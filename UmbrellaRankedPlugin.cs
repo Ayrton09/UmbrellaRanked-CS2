@@ -60,7 +60,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -1852,7 +1852,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                     return;
                 }
 
-                var escapedSample = soundSample.Replace("\"", string.Empty, StringComparison.Ordinal);
+                var escapedSample = StringSanitizer.SanitizeSoundClientCommandArgument(soundSample);
+                if (string.IsNullOrEmpty(escapedSample))
+                {
+                    return;
+                }
+
                 var volume = Math.Clamp(Config.Top1Sound.Volume, 0.0f, 1.0f).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
                 foreach (var player in players)
                 {
