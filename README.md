@@ -1,71 +1,158 @@
-![Umbrella Ranked cover](assets/cover.png)
-
 # Umbrella Ranked
 
-Native CounterStrikeSharp ranked system for CS2.
+A native [CounterStrikeSharp](https://docs.cssharp.dev/) ranking system for CS2, with MySQL or SQLite storage, an in-game WASD menu, and full localization.
 
 ## Features
 
-- Rank tracking with kills, deaths, assists, KDA, points, playtime, and per-weapon kills.
-- Ranking modes: `Points` or `Kda`.
-- MySQL and SQLite support, selected explicitly with `DatabaseMode`.
-- Internal WASD menu system for `top`, `toptime`, `topweapons`, pagination, details, and reset confirmation.
-- Top-player join announcements and optional Top #1 sound.
-- Autosave, disconnect save, map-end flush, and unload flush.
-- Per-player command cooldown.
-- Localization through CounterStrikeSharp `lang/*.json`.
-- Runtime competitive toggle with `css_rank_enabled 0/1`.
-- Map pattern blocking for competitive ranking while keeping playtime active.
+- Tracks kills, deaths, assists, KDA, points, playtime, and per-weapon kills.
+- Two ranking modes: `Points` or `Kda`.
+- MySQL or SQLite, selected explicitly through `DatabaseMode` — no silent fallback.
+- Built-in WASD menu for the leaderboards, with pagination, per-entry detail pages, and a reset confirmation prompt.
+- Join announcements for top-ranked players, with an optional Top #1 sound.
+- Autosave plus saves on disconnect, map end, and plugin unload.
+- Per-player command cooldown to prevent chat spam.
+- Localization through CounterStrikeSharp `lang/*.json` (English, Spanish, Portuguese, Russian, Chinese).
+- Runtime toggle via `css_rank_enabled`, and map patterns that pause competitive ranking while playtime keeps counting.
+
+## Requirements
+
+- CounterStrikeSharp `1.0.371` or newer (plugin API `175`+)
+- .NET 10 runtime
+- MySQL 5.7+ / MariaDB, or nothing extra if you use SQLite
+
+## Installation
+
+1. Download the release archive and extract it into your server's `game/csgo/` directory. It contains the full `addons/` tree.
+2. Edit the config at `addons/counterstrikesharp/configs/plugins/umbrellaranked/umbrellaranked.json`.
+3. Restart the server or reload the plugin.
+
+Files that must ship next to the plugin DLL:
+
+```text
+addons/counterstrikesharp/plugins/umbrellaranked/
+  umbrellaranked.dll
+  umbrellaranked.deps.json
+  Dapper.dll
+  MySqlConnector.dll
+  Microsoft.Extensions.DependencyInjection.Abstractions.dll
+  Microsoft.Extensions.Logging.Abstractions.dll
+  lang/                 # required
+  sqlite/               # required only when DatabaseMode = Sqlite
+```
+
+Tables and indexes are created automatically on first load.
 
 ## Commands
 
-Player commands:
+### Players
 
-- `!rank`, `/rank`, `rank`
-- `!top`, `/top`, `top`
-- `!toptime`, `/toptime`, `toptime`
-- `!topweapons`, `/topweapons`, `topweapons`
-- `!toparmas`, `/toparmas`, `toparmas`
-- `!resetrank`, `/resetrank`, `resetrank`
-- `!rrank`, `/rrank`, `rrank`
+Each command works as `!cmd`, `/cmd`, and as a plain chat word.
 
-Admin commands:
+| Command | Description |
+| --- | --- |
+| `rank` | Show your position and stats |
+| `top` | Open the points/KDA leaderboard |
+| `toptime` | Open the playtime leaderboard |
+| `topweapons` / `toparmas` | Open the per-weapon leaderboard menu |
+| `resetrank` / `rrank` | Reset your own stats (asks for confirmation) |
 
-- `css_rank_status`
-- `css_rank_prunenow`
+### Admins
 
-Admin commands require `@css/root`.
+Both require the `@css/root` permission.
 
-## Configuration
+| Command | Description |
+| --- | --- |
+| `css_rank_status` | Print backend, session, cache and autosave diagnostics |
+| `css_rank_prunenow` | Run the inactive-player prune immediately |
 
-Use [samples/UmbrellaRanked.mysql.sample.json](samples/UmbrellaRanked.mysql.sample.json) as the main template.
-
-Important settings:
-
-- `Enabled`: enables competitive ranking features.
-- `DatabaseMode`: `MySql` or `Sqlite`.
-- `RankingMode`: `Points` or `Kda`.
-- `MinimumKillsRequired`: minimum kills required to appear in ranked top lists.
-- `MinimumPlayersForStats`: minimum real players required before competitive stats count.
-- `DisabledRankMapPatterns`: map patterns where competitive ranking is paused.
-- `CommandCooldownSeconds`: per-player command anti-spam.
-- `AutosaveIntervalSeconds`: periodic save interval.
-- `TopCacheSeconds`: short cache for top menus.
-- `AllowResetRank` and `ResetRankCooldownDays`: reset-rank behavior.
-- `TopAnnouncementThreshold`: announces players who join while ranked inside this threshold.
-- `Top1Sound`: optional sound playback when a Top #1 player joins.
-
-Runtime CVar:
+### Console variable
 
 ```cfg
 css_rank_enabled 1
 ```
 
-Set `css_rank_enabled 0` to pause competitive rank tracking and rank/weapon menus immediately. Playtime and `!toptime` continue.
+Setting it to `0` immediately pauses competitive rank tracking and closes the rank and weapon menus. Playtime tracking and `toptime` keep working.
+
+## Menu controls
+
+| Key | Action |
+| --- | --- |
+| `W` / `S` | Move selection |
+| `A` / `D` | Previous / next page |
+| `E` | Select |
+| `R` | Back |
+| `Jump` / `Duck` | Close |
+
+Menus close automatically after 45 seconds of inactivity, and on death or team change.
+
+## Configuration
+
+Start from [samples/UmbrellaRanked.mysql.sample.json](samples/UmbrellaRanked.mysql.sample.json).
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `Enabled` | `true` | Master switch for competitive ranking |
+| `DatabaseMode` | `MySql` | `MySql` or `Sqlite` |
+| `RankingMode` | `Points` | `Points` or `Kda` |
+| `MinimumKillsRequired` | `100` | Kills needed to appear in ranked lists (minimum `100`) |
+| `MinimumPlayersForStats` | `4` | Real players needed before competitive stats count |
+| `DisabledRankMapPatterns` | surf/mg/bhop/jb/dr | Map patterns where competitive ranking pauses (`*` wildcard) |
+| `CommandCooldownSeconds` | `3.0` | Per-player anti-spam delay |
+| `AutosaveIntervalSeconds` | `120.0` | Periodic save interval; `0` disables |
+| `PruneInactiveDays` | `35` | Delete players unseen for this many days. **`0` disables pruning**; any other value has a floor of `35` |
+| `PruneOnStartup` | `false` | Run a prune when the plugin loads |
+| `PruneCheckIntervalHours` | `6.0` | Scheduled prune interval; `0` disables |
+| `AllowResetRank` | `true` | Allow players to reset their own stats |
+| `ResetRankCooldownDays` | `30` | Cooldown between self-resets; `0` disables |
+| `TopAnnouncementThreshold` | `5` | Announce joining players ranked within this position; `0` disables |
+| `LeaderboardLimit` | `50` | Rows fetched for the leaderboards |
+| `TopCacheSeconds` | `20.0` | Leaderboard cache lifetime; `0` disables caching |
+| `Top1Sound` | see below | Sound played when a Top #1 player joins |
+
+Out-of-range values are clamped on load and the adjustment is written to the server log.
+
+### Database
+
+MySQL requires `Host`, `Database` and `Username` to be set, otherwise the plugin refuses to load.
+
+```json
+"MySql": {
+  "Host": "127.0.0.1",
+  "Port": 3306,
+  "Database": "umbrella_ranked",
+  "Username": "user",
+  "Password": "your-password",
+  "ConnectionTimeoutSeconds": 15,
+  "MinimumPoolSize": 0,
+  "MaximumPoolSize": 50
+}
+```
+
+SQLite only needs a path, resolved relative to the plugin directory when not absolute.
+
+```json
+"Sqlite": {
+  "FilePath": "data/umbrella_ranked.sqlite",
+  "BusyTimeoutSeconds": 5,
+  "UseWriteAheadLogging": true
+}
+```
+
+### Top #1 sound
+
+```json
+"Top1Sound": {
+  "PlaybackMode": "ClientCommand",
+  "Value": "sounds/training/bell_normal.vsnd_c",
+  "ResourcePath": "",
+  "Volume": 0.3,
+  "Pitch": 0.0
+}
+```
+
+`PlaybackMode` accepts `Disabled`, `ClientCommand` (uses `playvol`, needs no precache) or `SoundEvent` (uses a precached sound event; set `ResourcePath` when the resource differs from `Value`).
 
 ## Points
-
-Default point values are conservative and close to common CS ranking plugins:
 
 ```json
 {
@@ -87,77 +174,68 @@ Default point values are conservative and close to common CS ranking plugins:
 }
 ```
 
-Effective examples:
+Resulting behaviour:
 
-- Normal kill: attacker `+2`, victim `-2`.
-- Headshot kill: attacker `+3`, victim `-2`.
-- Knife kill: attacker `+5`, victim `-5`.
-- Zeus/taser kill: attacker `+4`, victim `-4`.
-- Suicide: victim `-5`.
-- Teamkill: attacker `-5`, victim does not lose points.
+| Event | Attacker | Victim |
+| --- | --- | --- |
+| Normal kill | `+2` | `-2` |
+| Headshot kill | `+3` | `-2` |
+| Knife kill | `+5` | `-5` |
+| Zeus / taser kill | `+4` | `-4` |
+| Suicide | — | `-5` |
+| Teamkill | `-5` | no change |
 
-## Database
+Bonuses stack, so a knife headshot is `+6` for the attacker. Negative point values in the config are clamped to `0`, and a player's total can never drop below `0`.
 
-Tables use the fixed CS2 prefix `ur_cs2_`:
+## Database schema
 
-- `ur_cs2_player_stats`
-- `ur_cs2_weapon_stats`
+Two tables, both using the fixed `ur_cs2_` prefix:
 
-`ur_cs2_player_stats.playtime` is also used by `!toptime`.
+- `ur_cs2_player_stats` — one row per player: name, kills, deaths, assists, points, playtime, `last_seen`, `last_reset`
+- `ur_cs2_weapon_stats` — one row per player and weapon
 
-Reset rank clears kills, deaths, assists, points, and weapon stats, but preserves playtime.
+Steam IDs are stored in Steam2 format (`STEAM_1:0:12345`). Playtime lives in `ur_cs2_player_stats.playtime` and powers `toptime`.
 
-## Deploy
+Resetting a rank clears kills, deaths, assists, points and weapon stats, but **preserves playtime**. Pruning deletes inactive players from both tables and never touches players who are currently connected.
 
-Required plugin files:
+## Building from source
 
-- `umbrellaranked.dll`
-- `umbrellaranked.deps.json`
-- dependency DLLs beside the plugin DLL
-- `lang/`
-- `sqlite/` if `DatabaseMode = Sqlite`
-
-Config path:
-
-```text
-addons/counterstrikesharp/configs/plugins/umbrellaranked/umbrellaranked.json
+```bash
+dotnet build -c Release
 ```
 
-Plugin path:
+Output lands in `bin/Release/net10.0/`. The SQLite native libraries for Windows and Linux are copied into `sqlite/` automatically.
 
-```text
-addons/counterstrikesharp/plugins/umbrellaranked/
-```
-
-## Project Layout
+## Project layout
 
 ```text
 UmbrellaRanked/
-  Config/
-  Core/
-  Data/
-  Menus/
-  Models/
-  Utils/
-  lang/
-  samples/
-  UmbrellaRanked.csproj
-  UmbrellaRankedPlugin.cs
+  Config/     configuration model and enums
+  Core/       sessions, ranking, autosave, playtime, cooldowns
+  Data/       repositories, SQL dialects, schema initialization
+  Menus/      WASD menu system
+  Models/     records and DTOs
+  Utils/      Steam ID conversion and input sanitization
+  lang/       translations
+  samples/    example configs
 ```
 
 Main components:
 
-- `UmbrellaRankedPlugin.cs`: lifecycle, commands, events, menus, announcements.
-- `Core/RankService.cs`: load/save/reset orchestration.
-- `Core/PlayerSessionService.cs`: live session tracking and reconnect safety.
-- `Core/AutosaveService.cs`: non-overlapping autosaves and flushes.
-- `Menus/WasdMenuService.cs`: internal WASD menu system.
-- `Data/*Repository.cs`: MySQL/SQLite repositories.
-- `Data/SchemaInitializer.cs`: table and index initialization.
+- `UmbrellaRankedPlugin.cs` — lifecycle, commands, game events, menus, announcements
+- `Core/RankService.cs` — load, save and reset orchestration, leaderboard caching
+- `Core/PlayerSessionService.cs` — live session tracking and reconnect safety
+- `Core/AutosaveService.cs` — non-overlapping autosaves and flushes
+- `Menus/WasdMenuService.cs` — WASD menu rendering and input
+- `Data/*Repository.cs` — MySQL and SQLite repositories (Dapper, fully parameterized)
+- `Data/SchemaInitializer.cs` — table, column and index creation
 
-## Notes
+## Behaviour notes
 
-- Steam IDs are stored as Steam2-style strings.
-- Competitive stats require `MinimumPlayersForStats`; playtime does not.
-- Disabled map patterns pause competitive ranking only; playtime continues.
-- The plugin targets CounterStrikeSharp `1.0.369 or newer` and `.NET 10`.
+- Competitive stats only count once `MinimumPlayersForStats` real players are connected; playtime always counts.
+- Blocked map patterns pause competitive ranking only — playtime and `toptime` keep working.
+- Player stats are held in memory during a session and written by the autosave, on disconnect, on map end, and on unload.
+
+## License
+
+Released under the [MIT License](LICENSE).

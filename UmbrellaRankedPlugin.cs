@@ -60,7 +60,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "1.0.2";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -109,8 +109,14 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             config.AutosaveIntervalSeconds = 0;
         }
 
-        if (config.PruneInactiveDays < MinimumAllowedPruneInactiveDays)
+        if (config.PruneInactiveDays < 0)
         {
+            Logger.LogWarning("PruneInactiveDays cannot be negative. Disabling the inactive player prune.");
+            config.PruneInactiveDays = 0;
+        }
+        else if (config.PruneInactiveDays > 0 && config.PruneInactiveDays < MinimumAllowedPruneInactiveDays)
+        {
+            // 0 keeps pruning disabled; only positive values are clamped to the safe floor.
             Logger.LogWarning(
                 "PruneInactiveDays cannot be lower than {Minimum}. Clamping to {Minimum}.",
                 MinimumAllowedPruneInactiveDays,

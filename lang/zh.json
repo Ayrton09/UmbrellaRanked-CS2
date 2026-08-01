@@ -12,7 +12,6 @@
   "detail.playtime": "时间: {0}",
   "detail.points": "分数: {0}",
   "detail.weapon": "武器: {0}",
-  "menu.back": "返回",
   "prune.completed": "\u0004不活跃排名清理已完成。\u0001已移除 \u0006{0}\u0001 名玩家。",
   "prune.data_loading": "\u0010排名数据库尚未准备好。",
   "prune.started": "\u0004已开始清理不活跃排名数据。",

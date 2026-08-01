@@ -12,7 +12,6 @@
   "detail.playtime": "Tiempo: {0}",
   "detail.points": "Puntos: {0}",
   "detail.weapon": "Arma: {0}",
-  "menu.back": "Volver",
   "prune.completed": "\u0004La limpieza de ranks inactivos terminó. \u0001Se eliminaron \u0006{0}\u0001 jugador(es).",
   "prune.data_loading": "\u0010La base de datos del rank todavía no está lista.",
   "prune.started": "\u0004Se inició la limpieza de ranks inactivos.",

@@ -238,7 +238,10 @@ public sealed class PlayerSessionService
             return;
         }
 
-        _sessionsBySteamId.TryRemove(session.SteamId, out _);
+        // Remove only if this exact session is still the one stored under the key.
+        // A late-completing save of an old session must never evict the live
+        // session created by a reconnect under the same SteamID.
+        _sessionsBySteamId.TryRemove(new KeyValuePair<string, PlayerSession>(session.SteamId, session));
     }
 
     public IEnumerable<PlayerSession> GetAllSessions()

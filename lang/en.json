@@ -12,7 +12,6 @@
   "detail.playtime": "Playtime: {0}",
   "detail.points": "Points: {0}",
   "detail.weapon": "Weapon: {0}",
-  "menu.back": "Back",
   "prune.completed": "\u0004Inactive rank prune completed. \u0001Removed \u0006{0}\u0001 player(s).",
   "prune.data_loading": "\u0010The ranking database is not ready yet.",
   "prune.started": "\u0004Inactive rank prune started.",
