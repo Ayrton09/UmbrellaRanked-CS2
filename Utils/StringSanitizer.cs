@@ -25,8 +25,34 @@ public static class StringSanitizer
         // The name columns are VARCHAR(64); a longer name would otherwise fail
         // the whole save under MySQL strict mode.
         return sanitized.Length > MaxPlayerNameLength
-            ? sanitized[..MaxPlayerNameLength].Trim()
+            ? Truncate(sanitized, MaxPlayerNameLength).Trim()
             : sanitized;
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="value"/> to at most <paramref name="maxLength"/> UTF-16
+    /// units without splitting a surrogate pair, which would leave a lone surrogate
+    /// that no UTF-8 encoder can represent.
+    /// </summary>
+    public static string Truncate(string value, int maxLength)
+    {
+        if (maxLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        if (value.Length <= maxLength)
+        {
+            return value;
+        }
+
+        var length = maxLength;
+        if (char.IsHighSurrogate(value[length - 1]))
+        {
+            length--;
+        }
+
+        return value[..length];
     }
 
     public static string NormalizeOptionalSoundResource(string? resourcePath)

@@ -102,7 +102,9 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch
         {
-            await transaction.RollbackAsync(cancellationToken);
+            // Never the caller's token: on shutdown it is already cancelled and the
+            // rollback would throw over the exception that actually caused it.
+            await transaction.RollbackAsync(CancellationToken.None);
             throw;
         }
     }
@@ -132,7 +134,9 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch
         {
-            await transaction.RollbackAsync(cancellationToken);
+            // Never the caller's token: on shutdown it is already cancelled and the
+            // rollback would throw over the exception that actually caused it.
+            await transaction.RollbackAsync(CancellationToken.None);
             throw;
         }
     }
@@ -350,12 +354,34 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch
         {
-            await transaction.RollbackAsync(cancellationToken);
+            // Never the caller's token: on shutdown it is already cancelled and the
+            // rollback would throw over the exception that actually caused it.
+            await transaction.RollbackAsync(CancellationToken.None);
             throw;
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
+    {
+        // Both backends pool connections. Without this the pooled handles outlive
+        // the plugin: SQLite keeps the database file open and blocks the assembly
+        // load context from unloading, and MySQL sockets pile up on every reload.
+        try
+        {
+            await ClearConnectionPoolsAsync();
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Failed to clear the {Backend} connection pool during shutdown.",
+                Dialect.IsSqlite ? "SQLite" : "MySQL");
+        }
+
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual ValueTask ClearConnectionPoolsAsync()
     {
         return ValueTask.CompletedTask;
     }

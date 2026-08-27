@@ -12,7 +12,6 @@ public sealed class RankService
     private readonly PlayerSessionService _sessionService;
     private readonly WeaponStatsService _weaponStatsService;
     private readonly ILogger _logger;
-    private readonly SemaphoreSlim _leaderboardCacheLock = new(1, 1);
     private readonly Dictionary<string, CacheEntry> _leaderboardCache = new(StringComparer.Ordinal);
     private DateTimeOffset? _lastCacheRefreshUtc;
 
@@ -111,7 +110,8 @@ public sealed class RankService
 
         try
         {
-            var snapshot = session.CaptureSaveSnapshot(DateTimeOffset.UtcNow, force);
+            var capturedAtUtc = DateTimeOffset.UtcNow;
+            var snapshot = session.CaptureSaveSnapshot(capturedAtUtc, force);
             if (snapshot == null)
             {
                 _sessionService.RemoveIfCompleted(session);
@@ -119,7 +119,7 @@ public sealed class RankService
             }
 
             await _repository.SaveSnapshotAsync(snapshot, cancellationToken);
-            session.MarkSaveSuccessful(snapshot, DateTimeOffset.UtcNow);
+            session.MarkSaveSuccessful(snapshot, capturedAtUtc);
             _sessionService.RemoveIfCompleted(session);
             return true;
         }
@@ -138,17 +138,25 @@ public sealed class RankService
         }
     }
 
-    public async Task SaveSessionsAsync(IEnumerable<PlayerSession> sessions, bool force, CancellationToken cancellationToken)
+    /// <returns><c>true</c> only when every session was persisted.</returns>
+    public async Task<bool> SaveSessionsAsync(IEnumerable<PlayerSession> sessions, bool force, CancellationToken cancellationToken)
     {
+        var allSucceeded = true;
+
         foreach (var session in sessions)
         {
             if (cancellationToken.IsCancellationRequested)
             {
-                break;
+                return false;
             }
 
-            await SaveSessionAsync(session, force, cancellationToken);
+            if (!await SaveSessionAsync(session, force, cancellationToken))
+            {
+                allSucceeded = false;
+            }
         }
+
+        return allSucceeded;
     }
 
     public async Task<bool> ResetRankAsync(PlayerSession session, CancellationToken cancellationToken)
@@ -296,51 +304,57 @@ public sealed class RankService
 
     private async Task<T> GetCachedAsync<T>(string key, TimeSpan cacheTtl, Func<Task<T>> factory, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (cacheTtl <= TimeSpan.Zero)
         {
             return await factory();
         }
 
+        // The in-flight task itself is cached, so concurrent callers asking for the
+        // same key share one query while a different key is never made to wait.
+        Task<object> pending;
         var now = DateTimeOffset.UtcNow;
+
         lock (_leaderboardCache)
         {
-            if (_leaderboardCache.TryGetValue(key, out var cached) &&
-                cached.ExpiresAtUtc > now &&
-                cached.Value is T cachedValue)
+            if (_leaderboardCache.TryGetValue(key, out var cached) && cached.ExpiresAtUtc > now)
             {
-                return cachedValue;
+                pending = cached.Value;
+            }
+            else
+            {
+                PruneExpiredCacheEntriesUnsafe(now);
+                pending = InvokeFactoryAsync(factory);
+                _leaderboardCache[key] = new CacheEntry(now.Add(cacheTtl), pending);
+                _lastCacheRefreshUtc = now;
             }
         }
 
-        await _leaderboardCacheLock.WaitAsync(cancellationToken);
         try
         {
-            now = DateTimeOffset.UtcNow;
+            return (T)await pending;
+        }
+        catch
+        {
+            // A failed query must not stay cached for the rest of the TTL.
             lock (_leaderboardCache)
             {
-                PruneExpiredCacheEntriesUnsafe(now);
-
-                if (_leaderboardCache.TryGetValue(key, out var cached) &&
-                    cached.ExpiresAtUtc > now &&
-                    cached.Value is T cachedValue)
+                if (_leaderboardCache.TryGetValue(key, out var cached) && ReferenceEquals(cached.Value, pending))
                 {
-                    return cachedValue;
+                    _leaderboardCache.Remove(key);
                 }
             }
 
-            var value = await factory();
-            lock (_leaderboardCache)
-            {
-                _leaderboardCache[key] = new CacheEntry(now.Add(cacheTtl), value!);
-                _lastCacheRefreshUtc = now;
-            }
+            throw;
+        }
+    }
 
-            return value;
-        }
-        finally
-        {
-            _leaderboardCacheLock.Release();
-        }
+    private static async Task<object> InvokeFactoryAsync<T>(Func<Task<T>> factory)
+    {
+        // Yield first so the query never runs while the cache lock is held.
+        await Task.Yield();
+        return (await factory())!;
     }
 
     private void PruneExpiredCacheEntriesUnsafe(DateTimeOffset now)
@@ -354,5 +368,5 @@ public sealed class RankService
         }
     }
 
-    private sealed record CacheEntry(DateTimeOffset ExpiresAtUtc, object Value);
+    private sealed record CacheEntry(DateTimeOffset ExpiresAtUtc, Task<object> Value);
 }

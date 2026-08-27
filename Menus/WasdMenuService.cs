@@ -2,6 +2,7 @@ using System.Net;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
+using UmbrellaRanked.Utils;
 
 namespace UmbrellaRanked.Menus;
 
@@ -577,7 +578,7 @@ public sealed class WasdMenuService : IDisposable
             return value;
         }
 
-        return string.Concat(value.AsSpan(0, Math.Max(0, maxCharacters - 3)), "...");
+        return StringSanitizer.Truncate(value, Math.Max(0, maxCharacters - 3)) + "...";
     }
 
     private static void TryPrintToCenterHtml(CCSPlayerController player, string html)

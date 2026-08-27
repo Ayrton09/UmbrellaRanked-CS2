@@ -56,8 +56,14 @@ public sealed class AutosaveService : IDisposable
         try
         {
             var saveCandidates = _sessionService.GetSaveCandidates(includeDisconnected, force);
-            await _rankService.SaveSessionsAsync(saveCandidates, force, cancellationToken);
-            MarkSuccess();
+            if (await _rankService.SaveSessionsAsync(saveCandidates, force, cancellationToken))
+            {
+                MarkSuccess();
+            }
+            else
+            {
+                MarkPartialFailure();
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -101,8 +107,15 @@ public sealed class AutosaveService : IDisposable
         try
         {
             var saveCandidates = _sessionService.GetSaveCandidates(includeDisconnected: true, force: true);
-            await _rankService.SaveSessionsAsync(saveCandidates, force: true, CancellationToken.None);
-            MarkSuccess();
+            if (await _rankService.SaveSessionsAsync(saveCandidates, force: true, CancellationToken.None))
+            {
+                MarkSuccess();
+            }
+            else
+            {
+                MarkPartialFailure();
+                _logger.LogWarning("Autosave completed with at least one session that could not be saved.");
+            }
         }
         catch (Exception exception)
         {
@@ -119,6 +132,12 @@ public sealed class AutosaveService : IDisposable
     {
         _lastSuccessUtc = DateTimeOffset.UtcNow;
         _lastError = string.Empty;
+    }
+
+    private void MarkPartialFailure()
+    {
+        _lastFailureUtc = DateTimeOffset.UtcNow;
+        _lastError = "One or more sessions could not be saved. See the server log for details.";
     }
 
     private void MarkFailure(Exception exception)

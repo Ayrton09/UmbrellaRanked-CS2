@@ -20,12 +20,14 @@ using CssTimer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace UmbrellaRanked;
 
-[MinimumApiVersion(175)]
+[MinimumApiVersion(373)]
 public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRankedConfig>
 {
     private const int ConfigVersion = 1;
     private const int MinimumAllowedKillsRequired = 100;
     private const int MinimumAllowedPruneInactiveDays = 35;
+    private const double MapEndFlushTimeoutSeconds = 10.0;
+    private const double UnloadFlushTimeoutSeconds = 30.0;
     private const string TopPlayersMenuContext = "ranked.top.players";
     private const string TopTimeMenuContext = "ranked.top.time";
     private const string TopWeaponsMenuContext = "ranked.top.weapons";
@@ -60,7 +62,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "1.0.3";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -248,14 +250,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _wasdMenuService?.CloseAll();
         _autosaveService?.Stop();
 
-        try
-        {
-            _autosaveService?.FlushAsync(force: true, includeDisconnected: true, CancellationToken.None).GetAwaiter().GetResult();
-        }
-        catch (Exception exception)
-        {
-            Logger.LogError(exception, "Final Umbrella Ranked flush failed during unload.");
-        }
+        FlushWithTimeout(UnloadFlushTimeoutSeconds, "Final Umbrella Ranked flush");
 
         try
         {
@@ -442,13 +437,45 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private void OnMapEnd()
     {
+        FlushWithTimeout(MapEndFlushTimeoutSeconds, "Map-end flush");
+    }
+
+    /// <summary>
+    /// Blocking flush on the game thread, bounded so an unreachable database cannot
+    /// stall the server for the length of its connect timeout on every map change.
+    /// Anything left unsaved stays in memory and is retried by the next autosave.
+    /// </summary>
+    private void FlushWithTimeout(double timeoutSeconds, string context)
+    {
+        if (_autosaveService == null)
+        {
+            return;
+        }
+
+        using var flushTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+
         try
         {
-            _autosaveService?.FlushAsync(force: true, includeDisconnected: true, CancellationToken.None).GetAwaiter().GetResult();
+            _autosaveService.FlushAsync(force: true, includeDisconnected: true, flushTimeout.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // Reported below; the timeout is the expected cause.
         }
         catch (Exception exception)
         {
-            Logger.LogError(exception, "Map-end flush failed.");
+            Logger.LogError(exception, "{Context} failed.", context);
+            return;
+        }
+
+        // A save cancelled mid-flight is swallowed by the repository, so the token
+        // itself is the only reliable signal that the deadline was hit.
+        if (flushTimeout.IsCancellationRequested)
+        {
+            Logger.LogWarning(
+                "{Context} timed out after {TimeoutSeconds}s. Unsaved stats stay in memory and are retried on the next autosave.",
+                context,
+                timeoutSeconds);
         }
     }
 
@@ -565,15 +592,21 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private void OnPruneNowCommand(CCSPlayerController? player, CommandInfo commandInfo)
     {
+        if (player != null && !AdminManager.PlayerHasPermissions(player, "@css/root"))
+        {
+            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "admin.permission"));
+            return;
+        }
+
         if (_repository == null)
         {
             commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.data_loading"));
             return;
         }
 
-        if (player != null && !AdminManager.PlayerHasPermissions(player, "@css/root"))
+        if (Config.PruneInactiveDays <= 0)
         {
-            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "admin.permission"));
+            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.disabled"));
             return;
         }
 
@@ -960,9 +993,19 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 _sessionService.GetConnectedSteamIds(),
                 _shutdownToken);
 
-            if (showStartedMessage && steamIdForReply != null)
+            if (!showStartedMessage)
+            {
+                return;
+            }
+
+            if (steamIdForReply != null)
             {
                 QueueForSteamId(steamIdForReply, player => PrintLocalized(player, "prune.completed", deletedPlayers));
+            }
+            else
+            {
+                // Console/RCON callers have no session to reply to.
+                Logger.LogInformation("Inactive player prune completed. Removed {DeletedPlayers} player(s).", deletedPlayers);
             }
         }
         catch (Exception exception)
@@ -1191,6 +1234,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _wasdMenuService!.Open(player, new WasdMenuPage(
             Localizer.ForPlayer(player, "reset.confirm.title"),
             items,
+            // The renderer joins lines with <br> and HTML-encodes each one, so a
+            // newline inside the title would render as a space: the "playtime is
+            // kept" note has to be a real subtitle instead.
+            Localizer.ForPlayer(player, "reset.confirm.subtitle"),
             contextTag: ResetRankMenuContext));
     }
 
@@ -1305,16 +1352,22 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return false;
         }
 
-        if (!_commandCooldownService.TryConsume(identity.SteamId, Config.CommandCooldownSeconds, out var remainingSeconds))
+        if (!_sessionService.TryGetSession(player, out session) || !session.IsLoaded)
         {
-            PrintLocalized(player!, "cooldown.message", remainingSeconds);
+            // Rate limited on its own key so a command rejected while the data is
+            // still loading does not consume the player's real command cooldown.
+            if (_commandCooldownService.TryConsumeLoadingNotice(identity.SteamId, Config.CommandCooldownSeconds))
+            {
+                StartPlayerLoad(player!);
+                PrintLocalized(player!, "data.loading");
+            }
+
             return false;
         }
 
-        if (!_sessionService.TryGetSession(player, out session) || !session.IsLoaded)
+        if (!_commandCooldownService.TryConsume(identity.SteamId, Config.CommandCooldownSeconds, out var remainingSeconds))
         {
-            StartPlayerLoad(player!);
-            PrintLocalized(player!, "data.loading");
+            PrintLocalized(player!, "cooldown.message", remainingSeconds);
             return false;
         }
 

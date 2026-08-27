@@ -164,11 +164,16 @@ public sealed class PlayerSessionService
     public void MarkPlayerLoaded(PlayerSession session, PlayerRankStats? stats, IReadOnlyCollection<WeaponStatEntry> weapons, DateTimeOffset nowUtc)
     {
         session.ApplyLoadedData(stats, weapons, nowUtc);
+        RemoveIfCompleted(session);
     }
 
     public void MarkPlayerLoadFailed(PlayerSession session)
     {
         session.MarkLoadFailed();
+
+        // A failed load never becomes a save candidate, so this is the only place
+        // that can evict the session of a player who left while it was loading.
+        RemoveIfCompleted(session);
     }
 
     public void HandleDisconnect(int slot, DateTimeOffset nowUtc)

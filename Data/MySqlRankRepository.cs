@@ -92,4 +92,11 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
     {
         return new MySqlConnection(_connectionString);
     }
+
+    protected override async ValueTask ClearConnectionPoolsAsync()
+    {
+        // MySqlConnector's pools are static, but this is the plugin's own private
+        // copy of the assembly, so only this plugin's pools are affected.
+        await MySqlConnection.ClearAllPoolsAsync(CancellationToken.None);
+    }
 }

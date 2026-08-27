@@ -96,8 +96,10 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
         _useWriteAheadLogging = settings.UseWriteAheadLogging;
         var builder = new DbConnectionStringBuilder
         {
+            // Private cache (the default) on purpose: shared cache is a legacy SQLite
+            // mode that raises SQLITE_LOCKED under WAL, and busy_timeout does not
+            // retry that error the way it retries SQLITE_BUSY.
             ["Data Source"] = absoluteFilePath,
-            ["Cache"] = "Shared",
             ["Mode"] = "ReadWriteCreate",
             ["Pooling"] = "True"
         };
@@ -128,6 +130,22 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
                 "PRAGMA journal_mode = WAL",
                 cancellationToken: cancellationToken));
         }
+    }
+
+    protected override ValueTask ClearConnectionPoolsAsync()
+    {
+        // Microsoft.Data.Sqlite is loaded reflectively, so the static pool cleanup
+        // has to be reached the same way.
+        var clearAllPools = _sqliteConnectionType.GetMethod(
+            "ClearAllPools",
+            BindingFlags.Public | BindingFlags.Static,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null)
+            ?? throw new InvalidOperationException("Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools could not be resolved.");
+
+        clearAllPools.Invoke(null, null);
+        return ValueTask.CompletedTask;
     }
 
     private static Assembly LoadSqliteAssembly(string sqliteDependencyDirectory, string assemblyName)

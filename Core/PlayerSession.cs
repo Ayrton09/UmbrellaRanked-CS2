@@ -139,7 +139,16 @@ public sealed class PlayerSession
             var wasConnected = IsConnected;
             if (IsConnected)
             {
+                var previousPlaytimeSeconds = _persistedPlaytimeSeconds;
                 _persistedPlaytimeSeconds = GetEffectivePlaytimeSecondsUnsafe(nowUtc);
+
+                // The seconds banked here are not in the database yet. Only a
+                // loaded session may be marked dirty: flagging a failed load
+                // would keep the session pinned in memory forever.
+                if (IsLoaded && _persistedPlaytimeSeconds > previousPlaytimeSeconds)
+                {
+                    MarkDirtyUnsafe();
+                }
             }
 
             IsConnected = false;
@@ -280,12 +289,20 @@ public sealed class PlayerSession
         }
     }
 
-    public void MarkSaveSuccessful(PlayerDataSnapshot snapshot, DateTimeOffset nowUtc)
+    public void MarkSaveSuccessful(PlayerDataSnapshot snapshot, DateTimeOffset capturedAtUtc)
     {
         lock (_sync)
         {
-            _persistedPlaytimeSeconds = snapshot.PlaytimeSeconds;
-            _playtimeAnchorUtc = nowUtc;
+            // A disconnect can land between capture and completion, so persisted
+            // playtime must never move backwards to the snapshot value.
+            var creditedSeconds = Math.Max(0, snapshot.PlaytimeSeconds - _persistedPlaytimeSeconds);
+            _persistedPlaytimeSeconds += creditedSeconds;
+
+            // Advance the anchor by exactly the whole seconds that were credited so
+            // the sub-second remainder carries over instead of being lost per save.
+            _playtimeAnchorUtc = IsConnected && _playtimeAnchorUtc != default
+                ? _playtimeAnchorUtc.AddSeconds(creditedSeconds)
+                : capturedAtUtc;
 
             if (_version == snapshot.Version)
             {
@@ -351,20 +368,18 @@ public sealed class PlayerSession
 
     private int GetEffectivePlaytimeSecondsUnsafe(DateTimeOffset nowUtc)
     {
-        var total = _persistedPlaytimeSeconds;
+        return _persistedPlaytimeSeconds + GetElapsedSecondsUnsafe(nowUtc);
+    }
 
+    private int GetElapsedSecondsUnsafe(DateTimeOffset nowUtc)
+    {
         if (!IsConnected || _playtimeAnchorUtc == default)
         {
-            return total;
+            return 0;
         }
 
         var elapsedSeconds = (int)(nowUtc - _playtimeAnchorUtc).TotalSeconds;
-        if (elapsedSeconds > 0 && elapsedSeconds < 86400)
-        {
-            total += elapsedSeconds;
-        }
-
-        return total;
+        return elapsedSeconds > 0 && elapsedSeconds < 86400 ? elapsedSeconds : 0;
     }
 
     private int GetPreLoadPlaytimeSecondsUnsafe(DateTimeOffset nowUtc)
@@ -379,13 +394,7 @@ public sealed class PlayerSession
             return Math.Max(0, _persistedPlaytimeSeconds);
         }
 
-        if (_playtimeAnchorUtc == default)
-        {
-            return 0;
-        }
-
-        var elapsedSeconds = (int)(nowUtc - _playtimeAnchorUtc).TotalSeconds;
-        return elapsedSeconds > 0 && elapsedSeconds < 86400 ? elapsedSeconds : 0;
+        return GetElapsedSecondsUnsafe(nowUtc);
     }
 
     private int AddPointsUnsafe(int delta)
