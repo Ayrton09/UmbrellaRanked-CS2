@@ -1,15 +1,15 @@
 <h1 align="center">Umbrella Ranked</h1>
 
 <p align="center">
-  A native <a href="https://docs.cssharp.dev/">CounterStrikeSharp</a> ranking system for CS2 —
+  A native <a href="https://docs.cssharp.dev/">CounterStrikeSharp</a> ranking system for CS2:
   points, KDA, playtime and per-weapon stats, with an in-game WASD menu and full localization.
 </p>
 
 <p align="center">
   <a href="https://github.com/Ayrton09/UmbrellaRanked-CS2/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Ayrton09/UmbrellaRanked-CS2/actions/workflows/build.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.3-informational">
-  <img alt="CounterStrikeSharp" src="https://img.shields.io/badge/CounterStrikeSharp-1.0.373%2B-orange">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.4-informational">
+  <img alt="CounterStrikeSharp" src="https://img.shields.io/badge/CounterStrikeSharp-1.0.376%2B-orange">
   <img alt=".NET" src="https://img.shields.io/badge/.NET-10-512BD4">
 </p>
 
@@ -34,7 +34,7 @@
 |  | |
 | --- | --- |
 | **Stats** | Kills, deaths, assists, KDA, points, playtime and per-weapon kills |
-| **Ranking** | Two modes — `Points` or `Kda` — with a full tie-breaker chain so positions are stable |
+| **Ranking** | Two modes, `Points` or `Kda`, with a full tie-breaker chain so positions are stable |
 | **Storage** | MySQL or SQLite, chosen explicitly through `DatabaseMode`. No silent fallback: a misconfigured backend refuses to load instead of quietly losing data |
 | **Menus** | Built-in WASD menu with pagination, per-entry detail pages and a reset confirmation prompt |
 | **Announcements** | Join announcements for top-ranked players, with an optional Top #1 sound |
@@ -44,9 +44,9 @@
 
 ## Requirements
 
-- **CounterStrikeSharp `1.0.373`** or newer — the plugin API version is the CounterStrikeSharp build number, so `1.0.373` reports `373`
+- **CounterStrikeSharp `1.0.376`** or newer. The plugin API version is the CounterStrikeSharp build number, so `1.0.376` reports `376`
 - **.NET 10** runtime
-- **MySQL 5.7+ / MariaDB** — or nothing extra if you use SQLite
+- **MySQL 5.7+ / MariaDB**, or nothing extra if you use SQLite
 
 ## Installation
 
@@ -56,7 +56,7 @@
 
 Tables and indexes are created automatically on first load.
 
-### Fastest path — SQLite
+### Fastest path: SQLite
 
 Set `DatabaseMode` to `Sqlite` and you are done; the database file is created next to the plugin.
 
@@ -229,7 +229,7 @@ With the defaults above:
 | Headshot kill | `+3` | `-2` |
 | Knife kill | `+5` | `-5` |
 | Zeus / taser kill | `+4` | `-4` |
-| Suicide | — | `-5` |
+| Suicide | none | `-5` |
 | Teamkill | `-5` | no change |
 
 Bonuses stack, so a knife headshot is `+6` for the attacker. Negative point values in the config are clamped to `0`, and a player's total can never drop below `0`.
@@ -248,9 +248,9 @@ Top cache: 4 entries | TTL: 20s | Last refresh: 2026-08-27 01:14:02 UTC
 Last autosave OK: 2026-08-27 01:13:44 UTC | Last error: none
 ```
 
-- **Competitive: off** — check `Enabled`, `css_rank_enabled` and `Map blocked`.
-- **loading** stuck above `0` — the backend is not answering; see `Last error`.
-- **Last error** set while **Last autosave OK** is stale — writes are failing and stats are only in memory.
+- **Competitive: off**: check `Enabled`, `css_rank_enabled` and `Map blocked`.
+- **loading** stuck above `0`: the backend is not answering; see `Last error`.
+- **Last error** set while **Last autosave OK** is stale: writes are failing and stats are only in memory.
 
 ## Database schema
 
@@ -304,7 +304,7 @@ UmbrellaRanked/
 <summary><b>Behaviour notes</b></summary>
 
 - Competitive stats only count once `MinimumPlayersForStats` real players are connected; playtime always counts.
-- Blocked map patterns pause competitive ranking only — playtime and `toptime` keep working.
+- Blocked map patterns pause competitive ranking only; playtime and `toptime` keep working.
 - Player stats are held in memory during a session and written by the autosave, on disconnect, on map end and on unload.
 - The map-end and unload flushes are bounded, so an unreachable database cannot stall the game thread; anything left unsaved stays in memory and is retried by the next autosave.
 

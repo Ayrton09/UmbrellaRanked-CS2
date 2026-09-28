@@ -21,17 +21,36 @@ public sealed class PlayerSessionService
 
     public PlayerSession Attach(PlayerIdentity identity, DateTimeOffset nowUtc)
     {
-        var session = _sessionsBySteamId.GetOrAdd(
-            identity.SteamId,
-            _ => new PlayerSession(identity.SteamId, identity.SteamId64, identity.Name));
-
-        if (session.Attach(identity, nowUtc))
+        while (true)
         {
-            Interlocked.Increment(ref _connectedPlayerCount);
-        }
+            var session = _sessionsBySteamId.GetOrAdd(
+                identity.SteamId,
+                _ => new PlayerSession(identity.SteamId, identity.SteamId64, identity.Name));
 
-        _steamIdsBySlot[identity.Slot] = identity.SteamId;
-        return session;
+            var newlyConnected = session.Attach(identity, nowUtc);
+
+            // A save of the previous connection, finishing on another thread, may have
+            // evicted this session between GetOrAdd and Attach. Once attached it can no
+            // longer be evicted, so it only has to be put back if it is missing.
+            if (IsStored(identity.SteamId, session) || _sessionsBySteamId.TryAdd(identity.SteamId, session))
+            {
+                if (newlyConnected)
+                {
+                    Interlocked.Increment(ref _connectedPlayerCount);
+                }
+
+                _steamIdsBySlot[identity.Slot] = identity.SteamId;
+                return session;
+            }
+
+            // Another session was stored meanwhile; the orphan had nothing pending
+            // (it was evicted), so it can be dropped and the stored one attached.
+        }
+    }
+
+    private bool IsStored(string steamId, PlayerSession session)
+    {
+        return _sessionsBySteamId.TryGetValue(steamId, out var stored) && ReferenceEquals(stored, session);
     }
 
     public bool TryResolveIdentity(CCSPlayerController? player, out PlayerIdentity identity)

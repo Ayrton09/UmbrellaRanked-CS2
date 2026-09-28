@@ -20,7 +20,7 @@ using CssTimer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace UmbrellaRanked;
 
-[MinimumApiVersion(373)]
+[MinimumApiVersion(376)]
 public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRankedConfig>
 {
     private const int ConfigVersion = 1;
@@ -60,13 +60,21 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private readonly object _mainThreadActionsLock = new();
     private string _currentMapName = string.Empty;
     private bool _isUnloading;
+    private bool _entitySystemReady;
+    private CCSGameRulesProxy? _gameRulesProxy;
+    private ConVar? _teammatesAreEnemiesCvar;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.0.3";
+    public override string ModuleVersion => "1.0.4";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
-    public FakeConVar<bool> CompetitiveEnabledCvar { get; } = new("css_rank_enabled", string.Empty, true);
+    // Must stay a public field: CSSharp's RegisterFakeConVars only scans fields, so
+    // a property here is silently never registered as a console command.
+    public readonly FakeConVar<bool> CompetitiveEnabledCvar = new(
+        "css_rank_enabled",
+        "Enables competitive rank tracking. 0 pauses it; playtime keeps counting.",
+        true);
 
     public UmbrellaRankedConfig Config { get; set; } = new();
 
@@ -167,6 +175,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 throw new InvalidOperationException("MySQL mode requires Host, Database, and Username to be configured.");
             }
 
+            if (config.MySql.ConnectionTimeoutSeconds == 0)
+            {
+                Logger.LogWarning("MySql.ConnectionTimeoutSeconds must be greater than 0. Resetting to 15.");
+                config.MySql.ConnectionTimeoutSeconds = 15;
+            }
+
             if (config.MySql.MaximumPoolSize == 0)
             {
                 Logger.LogWarning("MySql.MaximumPoolSize must be greater than 0. Resetting to 50.");
@@ -196,6 +210,16 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _shutdownToken = _shutdown.Token;
         _isUnloading = false;
 
+        // On a fresh boot Load runs before the first map: touching entities then would
+        // poison CSSharp's cached entity list for every plugin until a restart. After a
+        // hot reload, or a `css_plugins load` in the middle of a map (which passes
+        // hotReload = false), the map is already running and OnMapStart will not fire
+        // again, so the current map has to be read here or map-pattern blocking is lost.
+        // Server.MapName only reads the global vars and is null before a map exists.
+        var runningMap = Server.MapName;
+        _entitySystemReady = hotReload || !string.IsNullOrEmpty(runningMap);
+        _currentMapName = _entitySystemReady ? runningMap ?? string.Empty : string.Empty;
+
         _sessionService = new PlayerSessionService(Logger);
         _weaponStatsService = new WeaponStatsService();
         _commandCooldownService = new CommandCooldownService();
@@ -216,7 +240,6 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
 
         CompetitiveEnabledCvar.ValueChanged += OnCompetitiveEnabledCvarChanged;
-        RegisterFakeConVars(this);
         RegisterPluginCallbacks();
 
         _autosaveService.Restart(Config.AutosaveIntervalSeconds);
@@ -224,9 +247,16 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         _loadConnectedPlayersWhenGlobalsAreReady = true;
 
+        Logger.LogInformation(
+            "Umbrella Ranked {Version} loaded with the {Backend} backend (map: {Map}, hot reload: {HotReload}).",
+            ModuleVersion,
+            Config.DatabaseMode,
+            string.IsNullOrEmpty(_currentMapName) ? "not started yet" : _currentMapName,
+            hotReload);
+
         if (Config.PruneOnStartup && Config.PruneInactiveDays > 0)
         {
-            RunBackground(PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "initial prune");
+            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "initial prune");
         }
     }
 
@@ -250,7 +280,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _wasdMenuService?.CloseAll();
         _autosaveService?.Stop();
 
-        FlushWithTimeout(UnloadFlushTimeoutSeconds, "Final Umbrella Ranked flush");
+        FlushWithTimeout(UnloadFlushTimeoutSeconds, "Final Umbrella Ranked flush", "Stats that were not saved yet are lost.");
 
         try
         {
@@ -301,7 +331,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var victim = @event.Userid;
         var assister = @event.Assister;
         var isSuicide = IsRealPlayer(attacker) && IsSamePlayer(attacker, victim);
-        var isTeamKill = IsRealPlayer(attacker) && IsRealPlayer(victim) && !isSuicide && IsSameTeam(attacker!, victim!);
+        // The victim only has to be a valid controller: killing a teammate bot is still
+        // a teamkill, it just records no death because bots have no rank.
+        var isTeamKill = IsRealPlayer(attacker) &&
+            victim is { IsValid: true } &&
+            !isSuicide &&
+            IsSameTeam(attacker!, victim);
 
         if (isTeamKill)
         {
@@ -430,58 +465,73 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
             if (!session.IsResetInProgress)
             {
-                RunBackground(_rankService!.SaveSessionAsync(session, force: true, _shutdownToken), "disconnect save");
+                RunBackground(() => _rankService!.SaveSessionAsync(session, force: true, _shutdownToken), "disconnect save");
             }
         }
     }
 
     private void OnMapEnd()
     {
-        FlushWithTimeout(MapEndFlushTimeoutSeconds, "Map-end flush");
+        FlushWithTimeout(MapEndFlushTimeoutSeconds, "Map-end flush", "Unsaved stats stay in memory and are retried on the next autosave.");
     }
 
     /// <summary>
-    /// Blocking flush on the game thread, bounded so an unreachable database cannot
-    /// stall the server for the length of its connect timeout on every map change.
-    /// Anything left unsaved stays in memory and is retried by the next autosave.
+    /// Flush that blocks the game thread for at most <paramref name="timeoutSeconds"/>,
+    /// so an unreachable or locked database cannot stall the server. The flush runs on
+    /// the thread pool: SQLite executes synchronously, so a cancellation token alone
+    /// could never interrupt a statement that is already running.
     /// </summary>
-    private void FlushWithTimeout(double timeoutSeconds, string context)
+    private void FlushWithTimeout(double timeoutSeconds, string context, string unsavedOutcome)
     {
         if (_autosaveService == null)
         {
             return;
         }
 
-        using var flushTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        var autosaveService = _autosaveService;
+        var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        var flush = Task.Run(() => autosaveService.FlushAsync(force: true, includeDisconnected: true, deadline.Token));
 
+        bool finished;
         try
         {
-            _autosaveService.FlushAsync(force: true, includeDisconnected: true, flushTimeout.Token).GetAwaiter().GetResult();
+            finished = flush.Wait(TimeSpan.FromSeconds(timeoutSeconds));
         }
-        catch (OperationCanceledException)
+        catch (AggregateException exception) when (exception.Flatten().InnerExceptions.All(inner => inner is OperationCanceledException))
         {
-            // Reported below; the timeout is the expected cause.
+            finished = true;
         }
-        catch (Exception exception)
+        catch (AggregateException exception)
         {
-            Logger.LogError(exception, "{Context} failed.", context);
+            Logger.LogError(exception.Flatten(), "{Context} failed. {Outcome}", context, unsavedOutcome);
+            deadline.Dispose();
             return;
         }
 
-        // A save cancelled mid-flight is swallowed by the repository, so the token
-        // itself is the only reliable signal that the deadline was hit.
-        if (flushTimeout.IsCancellationRequested)
+        if (!finished || deadline.IsCancellationRequested)
         {
+            // Not disposed when still running: the flush keeps observing the token.
             Logger.LogWarning(
-                "{Context} timed out after {TimeoutSeconds}s. Unsaved stats stay in memory and are retried on the next autosave.",
+                "{Context} did not finish within {TimeoutSeconds}s. {Outcome}",
                 context,
-                timeoutSeconds);
+                timeoutSeconds,
+                unsavedOutcome);
+            return;
         }
+
+        if (!flush.Result)
+        {
+            Logger.LogWarning("{Context} could not save every session. {Outcome}", context, unsavedOutcome);
+        }
+
+        deadline.Dispose();
     }
 
     private void OnMapStart(string mapName)
     {
         _currentMapName = mapName ?? string.Empty;
+        _entitySystemReady = true;
+        _gameRulesProxy = null;
     }
 
     private void OnServerPrecacheResources(ResourceManifest manifest)
@@ -495,6 +545,11 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private void OnTick()
     {
+        if (!_entitySystemReady)
+        {
+            return;
+        }
+
         DrainMainThreadQueue();
         _wasdMenuService?.OnTick();
         LoadConnectedPlayersWhenGlobalsAreReady();
@@ -513,7 +568,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return;
         }
 
-        RunBackground(ExecuteRankCommandAsync(session), "rank command");
+        RunBackground(() => ExecuteRankCommandAsync(session), "rank command");
     }
 
     private void OnTopCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -529,7 +584,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return;
         }
 
-        RunBackground(ExecuteTopCommandAsync(session), "top command");
+        RunBackground(() => ExecuteTopCommandAsync(session), "top command");
     }
 
     private void OnTopTimeCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -539,7 +594,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return;
         }
 
-        RunBackground(ExecuteTopTimeCommandAsync(session), "toptime command");
+        RunBackground(() => ExecuteTopTimeCommandAsync(session), "toptime command");
     }
 
     private void OnTopWeaponsCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -555,7 +610,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return;
         }
 
-        RunBackground(ExecuteTopWeaponsMenuAsync(session), "topweapons command");
+        RunBackground(() => ExecuteTopWeaponsMenuAsync(session), "topweapons command");
     }
 
     private void OnResetRankCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -612,7 +667,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.started"));
         var steamId = TryGetCallerSteamId(player);
-        RunBackground(PruneNowAsync(showStartedMessage: true, steamIdForReply: steamId), "manual prune");
+        RunBackground(() => PruneNowAsync(showStartedMessage: true, steamIdForReply: steamId), "manual prune");
     }
 
     private void OnRankStatusCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -1031,7 +1086,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         _pruneTimer = AddTimer((float)(Config.PruneCheckIntervalHours * 3600.0), () =>
         {
-            RunBackground(PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "scheduled prune");
+            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "scheduled prune");
         }, TimerFlags.REPEAT);
     }
 
@@ -1047,7 +1102,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return false;
         }
 
-        RunBackground(LoadPlayerAndMaybeAnnounceAsync(identity), $"load {identity.SteamId}");
+        RunBackground(() => LoadPlayerAndMaybeAnnounceAsync(identity), $"load {identity.SteamId}");
         return true;
     }
 
@@ -1136,7 +1191,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 Localizer.ForPlayer(player, "weapon.category.top"),
                 _ =>
                 {
-                    RunBackground(ExecuteTopWeaponCategoryAsync(steamId, category), $"weapon category top {category.TitleKey}");
+                    RunBackground(() => ExecuteTopWeaponCategoryAsync(steamId, category), $"weapon category top {category.TitleKey}");
                 })
         };
 
@@ -1145,7 +1200,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 weapon,
                 _ =>
                 {
-                    RunBackground(ExecuteTopWeaponAsync(steamId, weapon), $"weapon top {weapon}");
+                    RunBackground(() => ExecuteTopWeaponAsync(steamId, weapon), $"weapon top {weapon}");
                 })));
 
         return new WasdMenuPage(
@@ -1221,7 +1276,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 selectedPlayer =>
                 {
                     _wasdMenuService!.Close(selectedPlayer);
-                    RunBackground(ExecuteResetRankAsync(steamId), $"reset {steamId}");
+                    RunBackground(() => ExecuteResetRankAsync(steamId), $"reset {steamId}");
                 }),
             new WasdMenuItem(
                 Localizer.ForPlayer(player, "reset.confirm.no"),
@@ -1416,9 +1471,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         });
     }
 
-    private void RunBackground(Task task, string operationName)
+    private void RunBackground(Func<Task> work, string operationName)
     {
-        _ = task.ContinueWith(
+        // Task.Run on purpose: Microsoft.Data.Sqlite implements its async methods
+        // synchronously, so without it every SQLite query started from a command,
+        // event or timer would run to completion on the game thread.
+        _ = Task.Run(work).ContinueWith(
             continuation =>
             {
                 var exception = continuation.Exception?.Flatten();
@@ -1454,8 +1512,11 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         AddCommand("css_rrank", "Reset your rank stats.", OnResetRankCommand);
         AddCommand("css_rank_prunenow", "Run an inactive player prune immediately.", OnPruneNowCommand);
         AddCommand("css_rank_status", "Show Umbrella Ranked internal status.", OnRankStatusCommand);
-        AddCommandListener("say", OnSayCommand, HookMode.Pre);
-        AddCommandListener("say_team", OnSayCommand, HookMode.Pre);
+        // Distinct lambdas on purpose: CSSharp keys command listeners by delegate, and
+        // two conversions of the same method group are equal, so the second
+        // registration would overwrite the first and leave "say" hooked after unload.
+        AddCommandListener("say", (player, info) => OnSayCommand(player, info), HookMode.Pre);
+        AddCommandListener("say_team", (player, info) => OnSayCommand(player, info), HookMode.Pre);
 
         RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
@@ -1596,9 +1657,41 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         return first.Slot == second.Slot;
     }
 
-    private static bool IsSameTeam(CCSPlayerController first, CCSPlayerController second)
+    private bool IsSameTeam(CCSPlayerController first, CCSPlayerController second)
     {
+        // Free-for-all modes keep players on T and CT but make everyone an enemy.
+        if (AreTeammatesEnemies())
+        {
+            return false;
+        }
+
         return first.TeamNum > 1 && first.TeamNum == second.TeamNum;
+    }
+
+    private bool AreTeammatesEnemies()
+    {
+        _teammatesAreEnemiesCvar ??= ConVar.Find("mp_teammates_are_enemies");
+        return _teammatesAreEnemiesCvar?.GetPrimitiveValue<bool>() == true;
+    }
+
+    private bool IsWarmupPeriod()
+    {
+        try
+        {
+            if (_gameRulesProxy is not { IsValid: true })
+            {
+                _gameRulesProxy = Utilities
+                    .FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
+                    .FirstOrDefault();
+            }
+
+            return _gameRulesProxy?.GameRules?.WarmupPeriod == true;
+        }
+        catch (Exception exception)
+        {
+            Logger.LogDebug(exception, "Unable to read the warmup state.");
+            return false;
+        }
     }
 
     private int GetKillPointValue(EventPlayerDeath deathEvent)
@@ -1656,14 +1749,16 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return null;
         }
 
-        var nextResetUnix = lastResetUnixTime + (Config.ResetRankCooldownDays * 86400);
-        var currentUnix = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // 64-bit on purpose: in int arithmetic a cooldown of a few thousand days
+        // overflowed to a negative timestamp and made the reset available at once.
+        var nextResetUnix = lastResetUnixTime + (Config.ResetRankCooldownDays * 86400L);
+        var currentUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (currentUnix >= nextResetUnix)
         {
             return null;
         }
 
-        return nextResetUnix - currentUnix;
+        return (int)Math.Min(nextResetUnix - currentUnix, int.MaxValue);
     }
 
     private void AwardRoundTeamPoints(int winnerTeam, RankService rankService)
@@ -1695,6 +1790,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
 
         if (_sessionService == null || _sessionService.GetConnectedPlayerCount() < Config.MinimumPlayersForStats)
+        {
+            return false;
+        }
+
+        // Warmup has instant respawns, so counting it would hand out free stats.
+        if (IsWarmupPeriod())
         {
             return false;
         }

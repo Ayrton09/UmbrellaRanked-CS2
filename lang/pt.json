@@ -26,7 +26,7 @@
   "reset.confirm.yes": "Confirmar",
   "reset.cooldown": "\u0010Você poderá redefinir seu rank novamente em \u0004{0} \u0001dia(s) e \u0004{1} \u0001hora(s).",
   "reset.disabled": "\u0010A redefinição de rank está desativada.",
-  "reset.error": "\u0007[Umbrella Ranked]\u0001 Erro ao redefinir suas estatísticas de armas.",
+  "reset.error": "\u0007[Umbrella Ranked]\u0001 Erro ao redefinir suas estatísticas de rank.",
   "reset.in_progress": "\u0010Sua redefinição de rank já está sendo processada.",
   "reset.success": "\u0004Suas estatísticas de rank foram redefinidas com sucesso. \u0001O tempo jogado foi mantido.",
   "time.format": "{0}h {1}m",

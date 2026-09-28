@@ -78,7 +78,7 @@ public sealed class WasdMenuService : IDisposable
             OpenedAtUtc = DateTimeOffset.UtcNow,
             LastInputUtc = DateTimeOffset.UtcNow,
             LastInteractionUtc = DateTimeOffset.UtcNow,
-            PreviousButtons = player.Buttons
+            PreviousButtons = ReadButtons(player)
         };
 
         state.PageIndex = GetPageIndex(state.SelectedIndex);
@@ -222,8 +222,16 @@ public sealed class WasdMenuService : IDisposable
                 continue;
             }
 
-            HandleButtonInput(player, state, now);
-            Render(player, state, force: false);
+            try
+            {
+                HandleButtonInput(player, state, now);
+                Render(player, state, force: false);
+            }
+            catch (Exception)
+            {
+                // One broken player must not stop the loop for everyone else.
+                CloseInternal(state.Slot, null);
+            }
         }
     }
 
@@ -243,7 +251,7 @@ public sealed class WasdMenuService : IDisposable
         state.OpenedAtUtc = DateTimeOffset.UtcNow;
         state.LastInputUtc = DateTimeOffset.UtcNow;
         state.LastInteractionUtc = DateTimeOffset.UtcNow;
-        state.PreviousButtons = player.Buttons;
+        state.PreviousButtons = ReadButtons(player);
         state.IsSelecting = false;
         Freeze(player, page.FreezePlayer);
         Render(player, state, force: true);
@@ -275,7 +283,7 @@ public sealed class WasdMenuService : IDisposable
             return;
         }
 
-        PlayerButtons current = player.Buttons;
+        PlayerButtons current = ReadButtons(player);
 
         if (now - state.OpenedAtUtc < _initialInputDelay ||
             now - state.LastInputUtc < _inputDebounce)
@@ -416,7 +424,7 @@ public sealed class WasdMenuService : IDisposable
         state.SelectedIndex = FindFirstSelectableIndex(state.CurrentPage);
         state.PageIndex = GetPageIndex(state.SelectedIndex);
         state.OpenedAtUtc = DateTimeOffset.UtcNow;
-        state.PreviousButtons = player.Buttons;
+        state.PreviousButtons = ReadButtons(player);
         Freeze(player, state.CurrentPage.FreezePlayer);
         Render(player, state, force: true);
     }
@@ -590,6 +598,19 @@ public sealed class WasdMenuService : IDisposable
         catch
         {
             // Center HTML can throw during plugin teardown or very early server lifecycle.
+        }
+    }
+
+    private static PlayerButtons ReadButtons(CCSPlayerController player)
+    {
+        try
+        {
+            // CSSharp's Buttons dereferences Pawn.Value without a null check.
+            return player.Buttons;
+        }
+        catch (NullReferenceException)
+        {
+            return default;
         }
     }
 

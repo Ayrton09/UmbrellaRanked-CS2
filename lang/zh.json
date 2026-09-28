@@ -26,7 +26,7 @@
   "reset.confirm.yes": "确认",
   "reset.cooldown": "\u0010你可以在 \u0004{0} \u0001 天 \u0004{1} \u0001 小时后再次重置排名。",
   "reset.disabled": "\u0010排名重置已禁用。",
-  "reset.error": "\u0007[Umbrella Ranked]\u0001 重置你的武器统计时出错。",
+  "reset.error": "\u0007[Umbrella Ranked]\u0001 重置你的排名数据时出错。",
   "reset.in_progress": "\u0010你的排名重置已在处理中。",
   "reset.success": "\u0004你的排名数据已成功重置。\u0001在线时长已保留。",
   "time.format": "{0}小时 {1}分钟",

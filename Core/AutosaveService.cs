@@ -15,6 +15,7 @@ public sealed class AutosaveService : IDisposable
     private readonly SemaphoreSlim _flushLock = new(1, 1);
 
     private CssTimer? _autosaveTimer;
+    private CancellationTokenSource _runCancellation = new();
     private DateTimeOffset? _lastSuccessUtc;
     private DateTimeOffset? _lastFailureUtc;
     private string _lastError = string.Empty;
@@ -34,6 +35,7 @@ public sealed class AutosaveService : IDisposable
     public void Restart(double intervalSeconds)
     {
         Stop();
+        _runCancellation = new CancellationTokenSource();
 
         if (intervalSeconds <= 0)
         {
@@ -47,9 +49,14 @@ public sealed class AutosaveService : IDisposable
     {
         _autosaveTimer?.Kill();
         _autosaveTimer = null;
+
+        // Lets an autosave that is already running stop between sessions, so the
+        // final flush on unload does not have to wait behind it.
+        _runCancellation.Cancel();
     }
 
-    public async Task FlushAsync(bool force, bool includeDisconnected, CancellationToken cancellationToken)
+    /// <returns><c>true</c> when every session was saved.</returns>
+    public async Task<bool> FlushAsync(bool force, bool includeDisconnected, CancellationToken cancellationToken)
     {
         await _flushLock.WaitAsync(cancellationToken);
 
@@ -59,11 +66,11 @@ public sealed class AutosaveService : IDisposable
             if (await _rankService.SaveSessionsAsync(saveCandidates, force, cancellationToken))
             {
                 MarkSuccess();
+                return true;
             }
-            else
-            {
-                MarkPartialFailure();
-            }
+
+            MarkPartialFailure();
+            return false;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -78,8 +85,10 @@ public sealed class AutosaveService : IDisposable
 
     public void Dispose()
     {
+        // _flushLock is deliberately not disposed: an autosave still finishing on the
+        // thread pool releases it afterwards, and releasing a disposed semaphore throws
+        // in a task nobody observes. It never allocates a wait handle, so nothing leaks.
         Stop();
-        _flushLock.Dispose();
     }
 
     public AutosaveStatus GetStatus()
@@ -99,23 +108,32 @@ public sealed class AutosaveService : IDisposable
             return;
         }
 
-        _ = ExecuteAutosaveAsync();
+        // Task.Run: SQLite executes synchronously and this timer fires on the game thread.
+        var cancellationToken = _runCancellation.Token;
+        _ = Task.Run(() => ExecuteAutosaveAsync(cancellationToken));
     }
 
-    private async Task ExecuteAutosaveAsync()
+    private async Task ExecuteAutosaveAsync(CancellationToken cancellationToken)
     {
         try
         {
             var saveCandidates = _sessionService.GetSaveCandidates(includeDisconnected: true, force: true);
-            if (await _rankService.SaveSessionsAsync(saveCandidates, force: true, CancellationToken.None))
+            if (await _rankService.SaveSessionsAsync(saveCandidates, force: true, cancellationToken))
             {
                 MarkSuccess();
             }
             else
             {
-                MarkPartialFailure();
-                _logger.LogWarning("Autosave completed with at least one session that could not be saved.");
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    MarkPartialFailure();
+                    _logger.LogWarning("Autosave completed with at least one session that could not be saved.");
+                }
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Stopped for unload or restart; the final flush saves what is left.
         }
         catch (Exception exception)
         {
