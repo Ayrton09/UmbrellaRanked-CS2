@@ -40,6 +40,15 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
                 COALESCE(deaths, 0) AS Deaths,
                 COALESCE(assists, 0) AS Assists,
                 COALESCE(points, 0) AS Points,
+                COALESCE(headshots, 0) AS Headshots,
+                COALESCE(mvps, 0) AS Mvps,
+                COALESCE(rounds_won, 0) AS RoundsWon,
+                COALESCE(rounds_lost, 0) AS RoundsLost,
+                COALESCE(rounds_ct, 0) AS RoundsCt,
+                COALESCE(rounds_t, 0) AS RoundsT,
+                COALESCE(matches_won, 0) AS MatchesWon,
+                COALESCE(matches_lost, 0) AS MatchesLost,
+                COALESCE(matches_tied, 0) AS MatchesTied,
                 COALESCE(playtime, 0) AS PlaytimeSeconds,
                 COALESCE(last_seen, 0) AS LastSeenUnixTime,
                 COALESCE(last_reset, 0) AS LastResetUnixTime
@@ -61,7 +70,8 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
             SELECT
                 steamid AS SteamId,
                 weapon AS Weapon,
-                COALESCE(kills, 0) AS Kills
+                COALESCE(kills, 0) AS Kills,
+                COALESCE(headshots, 0) AS Headshots
             FROM ur_cs2_weapon_stats
             WHERE steamid = @SteamId
             ORDER BY weapon ASC;

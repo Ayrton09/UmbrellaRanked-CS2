@@ -59,14 +59,44 @@ public sealed class RankService
         }
     }
 
-    public bool TryRecordKill(CCSPlayerController player, string? rawWeapon, int points)
+    public bool TryRecordKill(CCSPlayerController player, string? rawWeapon, bool headshot, int points)
     {
         if (!_sessionService.TryGetSession(player, out var session))
         {
             return false;
         }
 
-        return session.TryApplyKill(_weaponStatsService.NormalizeWeaponName(rawWeapon), points);
+        return session.TryApplyKill(_weaponStatsService.NormalizeWeaponName(rawWeapon), headshot, points);
+    }
+
+    public bool TryRecordMvp(CCSPlayerController player, int points)
+    {
+        if (!_sessionService.TryGetSession(player, out var session))
+        {
+            return false;
+        }
+
+        return session.TryApplyMvp(points);
+    }
+
+    public bool TryRecordRoundResult(CCSPlayerController player, bool playedAsCounterTerrorist, bool won, int points)
+    {
+        if (!_sessionService.TryGetSession(player, out var session))
+        {
+            return false;
+        }
+
+        return session.TryApplyRoundResult(playedAsCounterTerrorist, won, points);
+    }
+
+    public bool TryRecordMatchResult(CCSPlayerController player, MatchResult result)
+    {
+        if (!_sessionService.TryGetSession(player, out var session))
+        {
+            return false;
+        }
+
+        return session.TryApplyMatchResult(result);
     }
 
     public bool TryRecordDeath(CCSPlayerController player, int penaltyPoints)

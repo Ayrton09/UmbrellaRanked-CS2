@@ -70,7 +70,7 @@ public sealed class PlayerSessionService
 
         identity = new PlayerIdentity(
             steamId64,
-            SteamIdConverter.ToSteam2(steamId64),
+            SteamIdConverter.ToStorageId(steamId64),
             StringSanitizer.SanitizePlayerName(player!.PlayerName),
             player.Slot,
             player.UserId);
@@ -171,7 +171,7 @@ public sealed class PlayerSessionService
         }
 
         var steamId64 = TryGetSteamId64(current);
-        if (steamId64 == 0 || SteamIdConverter.ToSteam2(steamId64) != session.SteamId)
+        if (steamId64 == 0 || steamId64 != session.SteamId64)
         {
             return false;
         }
@@ -315,6 +315,6 @@ public sealed class PlayerSessionService
         }
 
         var steamId64 = TryGetSteamId64(player);
-        return steamId64 != 0 && string.Equals(SteamIdConverter.ToSteam2(steamId64), session.SteamId, StringComparison.Ordinal);
+        return steamId64 != 0 && steamId64 == session.SteamId64;
     }
 }

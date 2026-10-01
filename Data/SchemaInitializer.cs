@@ -6,6 +6,19 @@ namespace UmbrellaRanked.Data;
 
 internal static class SchemaInitializer
 {
+    private static readonly string[] AddedIn110PlayerColumns =
+    [
+        "headshots",
+        "mvps",
+        "rounds_won",
+        "rounds_lost",
+        "rounds_ct",
+        "rounds_t",
+        "matches_won",
+        "matches_lost",
+        "matches_tied"
+    ];
+
     public static async Task InitializeAsync(
         DbConnection connection,
         SqlDialect dialect,
@@ -25,11 +38,97 @@ internal static class SchemaInitializer
         await EnsureColumnAsync(connection, dialect, "ur_cs2_player_stats", "assists", "INT NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(connection, dialect, "ur_cs2_player_stats", "points", "INT NOT NULL DEFAULT 0", cancellationToken);
 
+        foreach (var columnName in AddedIn110PlayerColumns)
+        {
+            await EnsureColumnAsync(connection, dialect, "ur_cs2_player_stats", columnName, "INT NOT NULL DEFAULT 0", cancellationToken);
+        }
+
+        await EnsureColumnAsync(connection, dialect, "ur_cs2_weapon_stats", "headshots", "INT NOT NULL DEFAULT 0", cancellationToken);
+
+        await MigrateSteam2IdsAsync(connection, dialect, logger, cancellationToken);
+
         await EnsureIndexAsync(connection, dialect, logger, "ur_cs2_player_stats", "idx_ur_cs2_player_stats_last_seen", "CREATE INDEX idx_ur_cs2_player_stats_last_seen ON ur_cs2_player_stats (last_seen)", cancellationToken);
         await EnsureIndexAsync(connection, dialect, logger, "ur_cs2_player_stats", "idx_ur_cs2_player_stats_points_top", "CREATE INDEX idx_ur_cs2_player_stats_points_top ON ur_cs2_player_stats (points, kills, assists, playtime)", cancellationToken);
         await EnsureIndexAsync(connection, dialect, logger, "ur_cs2_player_stats", "idx_ur_cs2_player_stats_kills_top", "CREATE INDEX idx_ur_cs2_player_stats_kills_top ON ur_cs2_player_stats (kills, assists, points, playtime)", cancellationToken);
         await EnsureIndexAsync(connection, dialect, logger, "ur_cs2_player_stats", "idx_ur_cs2_player_stats_playtime_top", "CREATE INDEX idx_ur_cs2_player_stats_playtime_top ON ur_cs2_player_stats (playtime, name)", cancellationToken);
         await EnsureIndexAsync(connection, dialect, logger, "ur_cs2_weapon_stats", "idx_ur_cs2_weapon_stats_weapon_kills_top", "CREATE INDEX idx_ur_cs2_weapon_stats_weapon_kills_top ON ur_cs2_weapon_stats (weapon, kills, steamid)", cancellationToken);
+    }
+
+    /// <summary>
+    /// Versions before 1.1.0 keyed players by Steam2 (<c>STEAM_1:Y:Z</c>). Web panels and
+    /// other plugins use the SteamID64 (<c>76561197960265728 + Z * 2 + Y</c>), so rows still
+    /// in the old format are rewritten in place, in one transaction.
+    /// </summary>
+    /// <remarks>
+    /// A row whose SteamID64 already exists is left alone. That only happens when a server
+    /// still on an older version shares the database and keeps writing Steam2 rows, and it
+    /// writes absolute totals, so merging the two rows could count the same stats twice.
+    /// </remarks>
+    private static async Task MigrateSteam2IdsAsync(
+        DbConnection connection,
+        SqlDialect dialect,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var legacyFilter = dialect.IsSqlite
+            ? "steamid GLOB 'STEAM_[0-5]:[01]:[0-9]*' AND SUBSTR(steamid, 11) NOT GLOB '*[^0-9]*'"
+            : "steamid LIKE 'STEAM%' AND steamid REGEXP '^STEAM_[0-5]:[01]:[0-9]+$'";
+        var steamId64Sql = dialect.IsSqlite
+            ? "CAST(76561197960265728 + CAST(SUBSTR(steamid, 11) AS INTEGER) * 2 + CAST(SUBSTR(steamid, 9, 1) AS INTEGER) AS TEXT)"
+            : "CAST(76561197960265728 + CAST(SUBSTR(steamid, 11) AS UNSIGNED) * 2 + CAST(SUBSTR(steamid, 9, 1) AS UNSIGNED) AS CHAR)";
+        var updateIgnore = dialect.IsSqlite ? "UPDATE OR IGNORE" : "UPDATE IGNORE";
+
+        var countLegacyPlayersSql = $"SELECT COUNT(*) FROM ur_cs2_player_stats WHERE {legacyFilter};";
+        var countLegacyWeaponsSql = $"SELECT COUNT(*) FROM ur_cs2_weapon_stats WHERE {legacyFilter};";
+
+        var legacyPlayers = await connection.ExecuteScalarAsync<int>(new CommandDefinition(countLegacyPlayersSql, cancellationToken: cancellationToken));
+        var legacyWeapons = await connection.ExecuteScalarAsync<int>(new CommandDefinition(countLegacyWeaponsSql, cancellationToken: cancellationToken));
+        if (legacyPlayers == 0 && legacyWeapons == 0)
+        {
+            return;
+        }
+
+        // The ignore variants skip a row whose new key already exists instead of failing
+        // the whole statement. Weapon rows only move once their player row has moved, so a
+        // player that stays on Steam2 keeps its weapon stats under the same key.
+        var migratePlayersSql = $"{updateIgnore} ur_cs2_player_stats SET steamid = {steamId64Sql} WHERE {legacyFilter};";
+        var migrateWeaponsSql = $"""
+            {updateIgnore} ur_cs2_weapon_stats SET steamid = {steamId64Sql}
+            WHERE {legacyFilter}
+              AND steamid NOT IN (SELECT steamid FROM ur_cs2_player_stats);
+            """;
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition(migratePlayersSql, transaction: transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(migrateWeaponsSql, transaction: transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+
+        // Counted from the table rather than from the UPDATE: MySqlConnector reports
+        // matched rows by default, which includes the rows the IGNORE skipped.
+        var remainingPlayers = await connection.ExecuteScalarAsync<int>(new CommandDefinition(countLegacyPlayersSql, cancellationToken: cancellationToken));
+        if (legacyPlayers > remainingPlayers)
+        {
+            logger.LogInformation(
+                "Migrated {Count} players from Steam2 IDs to SteamID64.",
+                legacyPlayers - remainingPlayers);
+        }
+
+        if (remainingPlayers > 0)
+        {
+            logger.LogWarning(
+                "{Count} players still use Steam2 IDs because a SteamID64 row for them already exists. " +
+                "Another server on a version older than 1.1.0 is probably sharing this database; update every server that uses it.",
+                remainingPlayers);
+        }
     }
 
     private static async Task EnsureColumnAsync(

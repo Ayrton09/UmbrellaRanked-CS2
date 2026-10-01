@@ -62,10 +62,11 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
     private bool _entitySystemReady;
     private CCSGameRulesProxy? _gameRulesProxy;
+    private bool _matchResultRecorded;
     private ConVar? _teammatesAreEnemiesCvar;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.0.4";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -344,7 +345,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
         else if (IsRealPlayer(attacker) && !isSuicide)
         {
-            rankService.TryRecordKill(attacker!, @event.Weapon, GetKillPointValue(@event));
+            rankService.TryRecordKill(attacker!, @event.Weapon, @event.Headshot, GetKillPointValue(@event));
         }
 
         if (!isSuicide &&
@@ -369,7 +370,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     {
         if (TryGetCompetitiveRankService(out var rankService) && IsRealPlayer(@event.Userid))
         {
-            rankService.TryRecordPoints(@event.Userid!, Config.Points.Mvp);
+            rankService.TryRecordMvp(@event.Userid!, Config.Points.Mvp);
         }
 
         return HookResult.Continue;
@@ -422,13 +423,29 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     [GameEventHandler]
     public HookResult OnRoundEnd(EventRoundEnd @event, GameEventInfo info)
     {
-        if (!TryGetCompetitiveRankService(out var rankService) ||
-            (Config.Points.TeamWin == 0 && Config.Points.TeamLossPenalty == 0))
+        if (TryGetCompetitiveRankService(out var rankService))
         {
-            return HookResult.Continue;
+            RecordRoundResults(@event.Winner, rankService);
         }
 
-        AwardRoundTeamPoints(@event.Winner, rankService);
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnCsWinPanelMatch(EventCsWinPanelMatch @event, GameEventInfo info)
+    {
+        if (!_matchResultRecorded && TryGetCompetitiveRankService(out var rankService))
+        {
+            RecordMatchResults(rankService);
+        }
+
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnBeginNewMatch(EventBeginNewMatch @event, GameEventInfo info)
+    {
+        _matchResultRecorded = false;
         return HookResult.Continue;
     }
 
@@ -532,6 +549,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _currentMapName = mapName ?? string.Empty;
         _entitySystemReady = true;
         _gameRulesProxy = null;
+        _matchResultRecorded = false;
     }
 
     private void OnServerPrecacheResources(ResourceManifest manifest)
@@ -763,6 +781,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 {
                     player.PrintToChat(Localizer.ForPlayer(player, "rank.unranked", stats.Points, stats.Kills, stats.Deaths, stats.Assists, stats.Kda, playtime));
                 }
+
+                player.PrintToChat(Localizer.ForPlayer(player, "rank.details", stats.HeadshotPercentage, stats.Mvps));
             });
         }
         catch (Exception exception)
@@ -1761,23 +1781,107 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         return (int)Math.Min(nextResetUnix - currentUnix, int.MaxValue);
     }
 
-    private void AwardRoundTeamPoints(int winnerTeam, RankService rankService)
+    private void RecordRoundResults(int winnerTeam, RankService rankService)
     {
         if (winnerTeam <= 1 || !TryGetRealPlayers(out var players))
         {
             return;
         }
 
+        // With teammates as enemies the T and CT sides mean nothing, so only the round
+        // points apply and the round is not recorded as won or lost.
+        var recordRounds = !AreTeammatesEnemies();
+
         foreach (var player in players)
         {
-            if ((int)player.TeamNum == winnerTeam)
+            var team = (int)player.TeamNum;
+            if (team <= 1)
             {
-                rankService.TryRecordPoints(player, Config.Points.TeamWin);
+                continue;
             }
-            else if ((int)player.TeamNum > 1)
+
+            var won = team == winnerTeam;
+            var points = won ? Config.Points.TeamWin : -Config.Points.TeamLossPenalty;
+
+            if (recordRounds)
             {
-                rankService.TryRecordPoints(player, -Config.Points.TeamLossPenalty);
+                rankService.TryRecordRoundResult(player, team == (int)CsTeam.CounterTerrorist, won, points);
             }
+            else
+            {
+                rankService.TryRecordPoints(player, points);
+            }
+        }
+    }
+
+    private void RecordMatchResults(RankService rankService)
+    {
+        if (AreTeammatesEnemies() ||
+            !TryGetTeamOutcome(out var counterTerroristResult) ||
+            !TryGetRealPlayers(out var players))
+        {
+            return;
+        }
+
+        _matchResultRecorded = true;
+
+        foreach (var player in players)
+        {
+            var result = (CsTeam)player.TeamNum switch
+            {
+                CsTeam.CounterTerrorist => counterTerroristResult,
+                CsTeam.Terrorist => Invert(counterTerroristResult),
+                _ => (MatchResult?)null
+            };
+
+            if (result is { } playerResult)
+            {
+                rankService.TryRecordMatchResult(player, playerResult);
+            }
+        }
+
+        static MatchResult Invert(MatchResult result) => result switch
+        {
+            MatchResult.Won => MatchResult.Lost,
+            MatchResult.Lost => MatchResult.Won,
+            _ => MatchResult.Tied
+        };
+    }
+
+    private bool TryGetTeamOutcome(out MatchResult counterTerroristResult)
+    {
+        counterTerroristResult = MatchResult.Tied;
+
+        try
+        {
+            var teams = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager").ToArray();
+            var counterTerrorists = teams.FirstOrDefault(team => team.TeamNum == (int)CsTeam.CounterTerrorist);
+            var terrorists = teams.FirstOrDefault(team => team.TeamNum == (int)CsTeam.Terrorist);
+            if (counterTerrorists == null || terrorists == null)
+            {
+                return false;
+            }
+
+            // A surrender ends the match on the spot, whatever the score was.
+            if (counterTerrorists.Surrendered != terrorists.Surrendered)
+            {
+                counterTerroristResult = counterTerrorists.Surrendered ? MatchResult.Lost : MatchResult.Won;
+                return true;
+            }
+
+            counterTerroristResult = counterTerrorists.Score.CompareTo(terrorists.Score) switch
+            {
+                > 0 => MatchResult.Won,
+                < 0 => MatchResult.Lost,
+                _ => MatchResult.Tied
+            };
+
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Logger.LogDebug(exception, "Unable to read the team scores.");
+            return false;
         }
     }
 

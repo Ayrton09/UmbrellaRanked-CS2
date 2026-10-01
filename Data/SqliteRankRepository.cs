@@ -19,6 +19,15 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             deaths INTEGER NOT NULL DEFAULT 0,
             assists INTEGER NOT NULL DEFAULT 0,
             points INTEGER NOT NULL DEFAULT 0,
+            headshots INTEGER NOT NULL DEFAULT 0,
+            mvps INTEGER NOT NULL DEFAULT 0,
+            rounds_won INTEGER NOT NULL DEFAULT 0,
+            rounds_lost INTEGER NOT NULL DEFAULT 0,
+            rounds_ct INTEGER NOT NULL DEFAULT 0,
+            rounds_t INTEGER NOT NULL DEFAULT 0,
+            matches_won INTEGER NOT NULL DEFAULT 0,
+            matches_lost INTEGER NOT NULL DEFAULT 0,
+            matches_tied INTEGER NOT NULL DEFAULT 0,
             playtime INTEGER NOT NULL DEFAULT 0,
             last_seen INTEGER NOT NULL DEFAULT 0,
             last_reset INTEGER NOT NULL DEFAULT 0
@@ -29,37 +38,57 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             steamid TEXT NOT NULL,
             weapon TEXT NOT NULL,
             kills INTEGER NOT NULL DEFAULT 0,
+            headshots INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (steamid, weapon)
         );
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @Headshots, @Mvps, @RoundsWon, @RoundsLost, @RoundsCt, @RoundsT, @MatchesWon, @MatchesLost, @MatchesTied, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
         ON CONFLICT(steamid) DO UPDATE SET
             name = excluded.name,
             kills = excluded.kills,
             deaths = excluded.deaths,
             assists = excluded.assists,
             points = excluded.points,
+            headshots = excluded.headshots,
+            mvps = excluded.mvps,
+            rounds_won = excluded.rounds_won,
+            rounds_lost = excluded.rounds_lost,
+            rounds_ct = excluded.rounds_ct,
+            rounds_t = excluded.rounds_t,
+            matches_won = excluded.matches_won,
+            matches_lost = excluded.matches_lost,
+            matches_tied = excluded.matches_tied,
             playtime = excluded.playtime,
             last_seen = excluded.last_seen,
             last_reset = excluded.last_reset;
         """,
         """
-        INSERT INTO ur_cs2_weapon_stats (steamid, weapon, kills)
-        VALUES (@SteamId, @Weapon, @Kills)
+        INSERT INTO ur_cs2_weapon_stats (steamid, weapon, kills, headshots)
+        VALUES (@SteamId, @Weapon, @Kills, @Headshots)
         ON CONFLICT(steamid, weapon) DO UPDATE SET
-            kills = excluded.kills;
+            kills = excluded.kills,
+            headshots = excluded.headshots;
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
         ON CONFLICT(steamid) DO UPDATE SET
             name = excluded.name,
             kills = 0,
             deaths = 0,
             assists = 0,
             points = 0,
+            headshots = 0,
+            mvps = 0,
+            rounds_won = 0,
+            rounds_lost = 0,
+            rounds_ct = 0,
+            rounds_t = 0,
+            matches_won = 0,
+            matches_lost = 0,
+            matches_tied = 0,
             playtime = excluded.playtime,
             last_seen = excluded.last_seen,
             last_reset = excluded.last_reset;

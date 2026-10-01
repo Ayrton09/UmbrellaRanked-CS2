@@ -1,18 +1,18 @@
+using System.Globalization;
+
 namespace UmbrellaRanked.Utils;
 
 public static class SteamIdConverter
 {
-    public static string ToSteam2(ulong steamId64)
+    /// <summary>
+    /// The key players are stored under: the SteamID64 in decimal, the format web panels
+    /// and other plugins use. Versions before 1.1.0 stored Steam2 (<c>STEAM_1:0:12345</c>);
+    /// the schema initializer migrates those rows.
+    /// </summary>
+    public static string ToStorageId(ulong steamId64)
     {
-        if (steamId64 == 0)
-        {
-            return string.Empty;
-        }
-
-        var accountId = steamId64 & 0xFFFFFFFF;
-        var authServer = accountId % 2;
-        var accountNumber = (accountId - authServer) / 2;
-
-        return $"STEAM_1:{authServer}:{accountNumber}";
+        return steamId64 == 0
+            ? string.Empty
+            : steamId64.ToString(CultureInfo.InvariantCulture);
     }
 }

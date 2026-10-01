@@ -18,6 +18,7 @@
   "prune.started": "\u0004A limpeza de ranks inativos foi iniciada.",
   "rank.disabled": "\u0010O ranking competitivo está desativado no momento.",
   "rank.message": "\u0001Posição: \u0010#{0} \u0008| \u0001Pontos: \u0004{1} \u0008| \u0001K/D/A: \u000b{2}/{3}/{4} \u0008| \u0001KDA: \u0006{5:n2} \u0008| \u0001Tempo: \u000a{6}",
+  "rank.details": "\u0001Headshots: \u0006{0:n0}% \u0008| \u0001MVP: \u0010{1}",
   "rank.position.error": "\u0007[Umbrella Ranked]\u0001 Erro ao carregar sua posição no rank.",
   "rank.unranked": "\u0001Posição: \u0010Sem Rank \u0008| \u0001Pontos: \u0004{0} \u0008| \u0001K/D/A: \u000b{1}/{2}/{3} \u0008| \u0001KDA: \u0006{4:n2} \u0008| \u0001Tempo: \u000a{5}",
   "reset.confirm.no": "Cancelar",

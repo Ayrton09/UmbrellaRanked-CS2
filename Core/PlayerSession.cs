@@ -5,12 +5,21 @@ namespace UmbrellaRanked.Core;
 public sealed class PlayerSession
 {
     private readonly object _sync = new();
-    private readonly Dictionary<string, int> _weaponKills = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, WeaponCounters> _weaponStats = new(StringComparer.Ordinal);
 
     private int _kills;
     private int _deaths;
     private int _assists;
     private int _points;
+    private int _headshots;
+    private int _mvps;
+    private int _roundsWon;
+    private int _roundsLost;
+    private int _roundsCt;
+    private int _roundsT;
+    private int _matchesWon;
+    private int _matchesLost;
+    private int _matchesTied;
     private int _persistedPlaytimeSeconds;
     private int _lastResetUnixTime;
     private DateTimeOffset _playtimeAnchorUtc;
@@ -107,13 +116,22 @@ public sealed class PlayerSession
             _deaths = stats?.Deaths ?? 0;
             _assists = stats?.Assists ?? 0;
             _points = stats?.Points ?? 0;
+            _headshots = stats?.Headshots ?? 0;
+            _mvps = stats?.Mvps ?? 0;
+            _roundsWon = stats?.RoundsWon ?? 0;
+            _roundsLost = stats?.RoundsLost ?? 0;
+            _roundsCt = stats?.RoundsCt ?? 0;
+            _roundsT = stats?.RoundsT ?? 0;
+            _matchesWon = stats?.MatchesWon ?? 0;
+            _matchesLost = stats?.MatchesLost ?? 0;
+            _matchesTied = stats?.MatchesTied ?? 0;
             _persistedPlaytimeSeconds = Math.Max(0, (stats?.PlaytimeSeconds ?? 0) + pendingPlaytimeSeconds);
             _lastResetUnixTime = stats?.LastResetUnixTime ?? 0;
-            _weaponKills.Clear();
+            _weaponStats.Clear();
 
             foreach (var weaponEntry in weaponStats)
             {
-                _weaponKills[weaponEntry.Weapon] = weaponEntry.Kills;
+                _weaponStats[weaponEntry.Weapon] = new WeaponCounters(weaponEntry.Kills, weaponEntry.Headshots);
             }
 
             IsLoading = false;
@@ -159,7 +177,7 @@ public sealed class PlayerSession
         }
     }
 
-    public bool TryApplyKill(string normalizedWeapon, int points)
+    public bool TryApplyKill(string normalizedWeapon, bool headshot, int points)
     {
         lock (_sync)
         {
@@ -168,9 +186,89 @@ public sealed class PlayerSession
                 return false;
             }
 
+            var headshotIncrement = headshot ? 1 : 0;
+            var weapon = _weaponStats.GetValueOrDefault(normalizedWeapon);
+
             _kills++;
+            _headshots += headshotIncrement;
             _points = AddPointsUnsafe(points);
-            _weaponKills[normalizedWeapon] = _weaponKills.GetValueOrDefault(normalizedWeapon) + 1;
+            _weaponStats[normalizedWeapon] = new WeaponCounters(weapon.Kills + 1, weapon.Headshots + headshotIncrement);
+            MarkDirtyUnsafe();
+            return true;
+        }
+    }
+
+    public bool TryApplyMvp(int points)
+    {
+        lock (_sync)
+        {
+            if (!IsLoaded || IsResetInProgress)
+            {
+                return false;
+            }
+
+            _mvps++;
+            _points = AddPointsUnsafe(points);
+            MarkDirtyUnsafe();
+            return true;
+        }
+    }
+
+    public bool TryApplyRoundResult(bool playedAsCounterTerrorist, bool won, int points)
+    {
+        lock (_sync)
+        {
+            if (!IsLoaded || IsResetInProgress)
+            {
+                return false;
+            }
+
+            if (playedAsCounterTerrorist)
+            {
+                _roundsCt++;
+            }
+            else
+            {
+                _roundsT++;
+            }
+
+            if (won)
+            {
+                _roundsWon++;
+            }
+            else
+            {
+                _roundsLost++;
+            }
+
+            _points = AddPointsUnsafe(points);
+            MarkDirtyUnsafe();
+            return true;
+        }
+    }
+
+    public bool TryApplyMatchResult(MatchResult result)
+    {
+        lock (_sync)
+        {
+            if (!IsLoaded || IsResetInProgress)
+            {
+                return false;
+            }
+
+            switch (result)
+            {
+                case MatchResult.Won:
+                    _matchesWon++;
+                    break;
+                case MatchResult.Lost:
+                    _matchesLost++;
+                    break;
+                default:
+                    _matchesTied++;
+                    break;
+            }
+
             MarkDirtyUnsafe();
             return true;
         }
@@ -245,16 +343,27 @@ public sealed class PlayerSession
     {
         lock (_sync)
         {
-            return new PlayerRankStats(
-                SteamId,
-                LastKnownName,
-                _kills,
-                _deaths,
-                _assists,
-                _points,
-                GetEffectivePlaytimeSecondsUnsafe(nowUtc),
-                (int)nowUtc.ToUnixTimeSeconds(),
-                _lastResetUnixTime);
+            return new PlayerRankStats
+            {
+                SteamId = SteamId,
+                Name = LastKnownName,
+                Kills = _kills,
+                Deaths = _deaths,
+                Assists = _assists,
+                Points = _points,
+                Headshots = _headshots,
+                Mvps = _mvps,
+                RoundsWon = _roundsWon,
+                RoundsLost = _roundsLost,
+                RoundsCt = _roundsCt,
+                RoundsT = _roundsT,
+                MatchesWon = _matchesWon,
+                MatchesLost = _matchesLost,
+                MatchesTied = _matchesTied,
+                PlaytimeSeconds = GetEffectivePlaytimeSecondsUnsafe(nowUtc),
+                LastSeenUnixTime = (int)nowUtc.ToUnixTimeSeconds(),
+                LastResetUnixTime = _lastResetUnixTime
+            };
         }
     }
 
@@ -279,11 +388,20 @@ public sealed class PlayerSession
                 _deaths,
                 _assists,
                 _points,
+                _headshots,
+                _mvps,
+                _roundsWon,
+                _roundsLost,
+                _roundsCt,
+                _roundsT,
+                _matchesWon,
+                _matchesLost,
+                _matchesTied,
                 GetEffectivePlaytimeSecondsUnsafe(nowUtc),
                 (int)nowUtc.ToUnixTimeSeconds(),
                 _lastResetUnixTime,
-                _weaponKills
-                    .Select(entry => new WeaponStatEntry(SteamId, entry.Key, entry.Value))
+                _weaponStats
+                    .Select(entry => new WeaponStatEntry(SteamId, entry.Key, entry.Value.Kills, entry.Value.Headshots))
                     .ToList(),
                 _version);
         }
@@ -340,7 +458,16 @@ public sealed class PlayerSession
             _deaths = 0;
             _assists = 0;
             _points = 0;
-            _weaponKills.Clear();
+            _headshots = 0;
+            _mvps = 0;
+            _roundsWon = 0;
+            _roundsLost = 0;
+            _roundsCt = 0;
+            _roundsT = 0;
+            _matchesWon = 0;
+            _matchesLost = 0;
+            _matchesTied = 0;
+            _weaponStats.Clear();
             _persistedPlaytimeSeconds = snapshot.PlaytimeSeconds;
             _lastResetUnixTime = snapshot.ResetUnixTime;
             _playtimeAnchorUtc = nowUtc;
@@ -408,4 +535,6 @@ public sealed class PlayerSession
         _hasPendingSave = true;
         _version++;
     }
+
+    private readonly record struct WeaponCounters(int Kills, int Headshots);
 }

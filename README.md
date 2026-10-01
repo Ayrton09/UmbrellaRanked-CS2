@@ -8,7 +8,7 @@
 <p align="center">
   <a href="https://github.com/Ayrton09/UmbrellaRanked-CS2/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Ayrton09/UmbrellaRanked-CS2/actions/workflows/build.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.4-informational">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-informational">
   <img alt="CounterStrikeSharp" src="https://img.shields.io/badge/CounterStrikeSharp-1.0.376%2B-orange">
   <img alt=".NET" src="https://img.shields.io/badge/.NET-10-512BD4">
 </p>
@@ -33,7 +33,7 @@
 
 |  | |
 | --- | --- |
-| **Stats** | Kills, deaths, assists, KDA, points, playtime and per-weapon kills |
+| **Stats** | Kills, deaths, assists, headshots, MVPs, KDA, points, playtime, rounds and matches won or lost, rounds per side, and per-weapon kills and headshots |
 | **Ranking** | Two modes, `Points` or `Kda`, with a full tie-breaker chain so positions are stable |
 | **Storage** | MySQL or SQLite, chosen explicitly through `DatabaseMode`. No silent fallback: a misconfigured backend refuses to load instead of quietly losing data |
 | **Menus** | Built-in WASD menu with pagination, per-entry detail pages and a reset confirmation prompt |
@@ -89,7 +89,7 @@ Each command works as `!cmd`, `/cmd`, and as a plain chat word.
 
 | Command | Description |
 | --- | --- |
-| `rank` | Show your position and stats |
+| `rank` | Show your position, points, K/D/A, KDA, playtime, headshot percentage and MVPs |
 | `top` | Open the points/KDA leaderboard |
 | `toptime` | Open the playtime leaderboard |
 | `topweapons` · `toparmas` | Open the per-weapon leaderboard menu |
@@ -258,12 +258,28 @@ Two tables, both using the fixed `ur_cs2_` prefix:
 
 | Table | Contents |
 | --- | --- |
-| `ur_cs2_player_stats` | One row per player: name, kills, deaths, assists, points, playtime, `last_seen`, `last_reset` |
-| `ur_cs2_weapon_stats` | One row per player and weapon |
+| `ur_cs2_player_stats` | One row per player (columns below) |
+| `ur_cs2_weapon_stats` | One row per player and weapon: `kills`, `headshots` |
 
-Steam IDs are stored in Steam2 format (`STEAM_1:0:12345`). Playtime lives in `ur_cs2_player_stats.playtime` and powers `toptime`.
+| Column | Meaning |
+| --- | --- |
+| `steamid` | SteamID64 as text, for example `76561197960265928` |
+| `name` | Last known name |
+| `kills`, `deaths`, `assists`, `points` | Ranking stats |
+| `headshots`, `mvps` | Headshot kills and round MVP awards |
+| `rounds_won`, `rounds_lost` | Rounds that ended with the player on the winning or the losing side |
+| `rounds_ct`, `rounds_t` | Rounds the player finished as CT or as T |
+| `matches_won`, `matches_lost`, `matches_tied` | Match results, taken from the final score (a surrender counts as a loss for the team that surrendered) |
+| `playtime` | Seconds on the server, which powers `toptime` |
+| `last_seen`, `last_reset` | Unix timestamps |
 
-Resetting a rank clears kills, deaths, assists, points and weapon stats but **preserves playtime**. Pruning deletes inactive players from both tables and never touches players who are currently connected.
+The new columns start at `0` when a database is upgraded to 1.1.0, so for players with older kills the headshot percentage shown by `rank` starts low and catches up as they play.
+
+Rounds and matches are only counted while competitive ranking is active, never during warmup, and not at all in free-for-all modes (`mp_teammates_are_enemies 1`), where the T and CT sides mean nothing.
+
+Players are keyed by SteamID64, the format web panels and other plugins use. Versions before 1.1.0 stored Steam2 IDs (`STEAM_1:0:12345`); the first start of 1.1.0 converts them in place, with their weapon stats. If several servers share one database, update all of them together: a server still on an older version keeps writing Steam2 rows, and those are left alone (with a warning in the log) when the player already has a SteamID64 row.
+
+Resetting a rank clears every stat and the weapon stats but **preserves playtime**. Pruning deletes inactive players from both tables and never touches players who are currently connected.
 
 ## Building from source
 
