@@ -94,6 +94,8 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             last_reset = excluded.last_reset;
         """);
 
+    public const int MaxBusyTimeoutSeconds = 600;
+
     private readonly string _connectionString;
     private readonly int _busyTimeoutMilliseconds;
     private readonly bool _useWriteAheadLogging;
@@ -121,7 +123,8 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             Directory.CreateDirectory(directoryPath);
         }
 
-        _busyTimeoutMilliseconds = Math.Max(0, settings.BusyTimeoutSeconds) * 1000;
+        // Clamped before the multiplication: a huge configured value overflowed int.
+        _busyTimeoutMilliseconds = Math.Clamp(settings.BusyTimeoutSeconds, 0, MaxBusyTimeoutSeconds) * 1000;
         _useWriteAheadLogging = settings.UseWriteAheadLogging;
         var builder = new DbConnectionStringBuilder
         {

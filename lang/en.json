@@ -36,6 +36,8 @@
   "top.line.first": "[TOP 1] {0} -> {1} pts",
   "top.line.rest": "#{0} {1} -> {2} pts",
   "top.load_error": "\u0007[Umbrella Ranked]\u0001 Error loading the top list.",
+  "top.mode.kda": "KDA",
+  "top.mode.points": "Points",
   "top.subtitle": "{0} | Min: {1}",
   "top.title": "Top Players",
   "toptime.empty": "No recorded playtime yet.",

@@ -36,6 +36,8 @@
   "top.line.first": "[TOP 1] {0} -> {1} pts",
   "top.line.rest": "#{0} {1} -> {2} pts",
   "top.load_error": "\u0007[Umbrella Ranked]\u0001 Erro ao carregar o top.",
+  "top.mode.kda": "KDA",
+  "top.mode.points": "Pontos",
   "top.subtitle": "{0} | Min: {1}",
   "top.title": "Melhores Jogadores",
   "toptime.empty": "Ainda não há tempo registrado.",

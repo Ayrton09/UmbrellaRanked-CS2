@@ -36,6 +36,8 @@
   "top.line.first": "[ТОП 1] {0} -> {1} pts",
   "top.line.rest": "#{0} {1} -> {2} pts",
   "top.load_error": "\u0007[Umbrella Ranked]\u0001 Ошибка загрузки топа.",
+  "top.mode.kda": "KDA",
+  "top.mode.points": "Очки",
   "top.subtitle": "{0} | Мин: {1}",
   "top.title": "Лучшие Игроки",
   "toptime.empty": "Пока нет записанного времени.",

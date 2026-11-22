@@ -26,6 +26,8 @@ public sealed class PlayerSession
     private bool _hasPendingSave;
     private long _version;
     private readonly SemaphoreSlim _persistenceLock = new(1, 1);
+    private int _loadFailures;
+    private DateTimeOffset? _nextLoadRetryUtc;
 
     public PlayerSession(string steamId, ulong steamId64, string initialName)
     {
@@ -65,6 +67,47 @@ public sealed class PlayerSession
     }
 
     public SemaphoreSlim PersistenceLock => _persistenceLock;
+
+    /// <summary>
+    /// How many loads in a row have failed since the last success.
+    /// </summary>
+    public int LoadFailureCount
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _loadFailures;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pushes the next retry a little forward when one is launched, so a background task
+    /// that takes a moment to start is not launched a second time by the next scan.
+    /// </summary>
+    public void DeferLoadRetry(DateTimeOffset nowUtc, TimeSpan delay)
+    {
+        lock (_sync)
+        {
+            if (_nextLoadRetryUtc.HasValue)
+            {
+                _nextLoadRetryUtc = nowUtc + delay;
+            }
+        }
+    }
+
+    public bool IsDueForLoadRetry(DateTimeOffset nowUtc)
+    {
+        lock (_sync)
+        {
+            return IsConnected &&
+                !IsLoaded &&
+                !IsLoading &&
+                _nextLoadRetryUtc is { } retryAt &&
+                retryAt <= nowUtc;
+        }
+    }
 
     public bool BeginLoad()
     {
@@ -136,17 +179,24 @@ public sealed class PlayerSession
 
             IsLoading = false;
             IsLoaded = true;
+            _loadFailures = 0;
+            _nextLoadRetryUtc = null;
             _hasPendingSave = pendingPlaytimeSeconds > 0;
             _version = _hasPendingSave ? 1 : 0;
             _playtimeAnchorUtc = nowUtc;
         }
     }
 
-    public void MarkLoadFailed()
+    public void MarkLoadFailed(DateTimeOffset nowUtc)
     {
         lock (_sync)
         {
             IsLoading = false;
+            _loadFailures++;
+
+            // Backoff 15 s, 30 s, 60 s and then 120 s between attempts.
+            var delaySeconds = Math.Min(120, 15 * (1 << Math.Min(_loadFailures - 1, 3)));
+            _nextLoadRetryUtc = nowUtc.AddSeconds(delaySeconds);
         }
     }
 
@@ -429,14 +479,30 @@ public sealed class PlayerSession
         }
     }
 
-    public bool TryBeginReset(DateTimeOffset nowUtc, out ResetRankSnapshot snapshot)
+    /// <returns><c>null</c> when the reset started, otherwise why it was refused.</returns>
+    public ResetRankOutcome? TryBeginReset(DateTimeOffset nowUtc, int cooldownDays, out ResetRankSnapshot snapshot)
     {
         lock (_sync)
         {
-            if (!IsLoaded || IsResetInProgress)
+            snapshot = null!;
+
+            if (!IsLoaded)
             {
-                snapshot = null!;
-                return false;
+                return ResetRankOutcome.NotLoaded;
+            }
+
+            if (IsResetInProgress)
+            {
+                return ResetRankOutcome.Busy;
+            }
+
+            // Checked here, under the same lock that marks the reset as started, so two
+            // confirmations racing each other cannot both pass the cooldown.
+            if (cooldownDays > 0 &&
+                _lastResetUnixTime > 0 &&
+                nowUtc.ToUnixTimeSeconds() < _lastResetUnixTime + (cooldownDays * 86400L))
+            {
+                return ResetRankOutcome.OnCooldown;
             }
 
             IsResetInProgress = true;
@@ -446,7 +512,7 @@ public sealed class PlayerSession
                 GetEffectivePlaytimeSecondsUnsafe(nowUtc),
                 (int)nowUtc.ToUnixTimeSeconds());
 
-            return true;
+            return null;
         }
     }
 

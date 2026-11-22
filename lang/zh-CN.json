@@ -36,6 +36,8 @@
   "top.line.first": "[第一名] {0} -> {1} 分",
   "top.line.rest": "#{0} {1} -> {2} 分",
   "top.load_error": "\u0007[Umbrella Ranked]\u0001 加载排行榜时出错。",
+  "top.mode.kda": "KDA",
+  "top.mode.points": "积分",
   "top.subtitle": "{0} | 最低: {1}",
   "top.title": "顶级玩家",
   "toptime.empty": "目前还没有记录的在线时间。",

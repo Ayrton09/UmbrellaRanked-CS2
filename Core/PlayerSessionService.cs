@@ -12,11 +12,18 @@ public sealed class PlayerSessionService
     private readonly ConcurrentDictionary<string, PlayerSession> _sessionsBySteamId = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<int, string> _steamIdsBySlot = new();
     private readonly ILogger _logger;
+    private readonly Func<bool> _allowUnauthenticatedSteamId;
     private int _connectedPlayerCount;
 
-    public PlayerSessionService(ILogger logger)
+    /// <param name="allowUnauthenticatedSteamId">
+    /// Whether a player without an authorized SteamID may be identified by the raw
+    /// <c>SteamID</c> field. Only meant for <c>sv_lan 1</c> servers, where Steam never
+    /// authorizes anybody. Read on the game thread.
+    /// </param>
+    public PlayerSessionService(ILogger logger, Func<bool>? allowUnauthenticatedSteamId = null)
     {
         _logger = logger;
+        _allowUnauthenticatedSteamId = allowUnauthenticatedSteamId ?? (() => false);
     }
 
     public PlayerSession Attach(PlayerIdentity identity, DateTimeOffset nowUtc)
@@ -188,7 +195,7 @@ public sealed class PlayerSessionService
 
     public void MarkPlayerLoadFailed(PlayerSession session)
     {
-        session.MarkLoadFailed();
+        session.MarkLoadFailed(DateTimeOffset.UtcNow);
 
         // A failed load never becomes a save candidate, so this is the only place
         // that can evict the session of a player who left while it was loading.
@@ -247,6 +254,13 @@ public sealed class PlayerSessionService
             .ToList();
     }
 
+    public IReadOnlyList<PlayerSession> GetSessionsDueForLoadRetry(DateTimeOffset nowUtc)
+    {
+        return _sessionsBySteamId.Values
+            .Where(session => session.IsDueForLoadRetry(nowUtc))
+            .ToList();
+    }
+
     public IReadOnlyCollection<string> GetConnectedSteamIds()
     {
         return _sessionsBySteamId.Values
@@ -290,6 +304,13 @@ public sealed class PlayerSessionService
         catch (Exception exception)
         {
             _logger.LogDebug(exception, "AuthorizedSteamID lookup failed for slot {Slot}", player.Slot);
+        }
+
+        // The raw SteamID field is whatever the client claimed and has not been checked
+        // against Steam, so it is only trusted when the server has no Steam auth at all.
+        if (!_allowUnauthenticatedSteamId())
+        {
+            return 0;
         }
 
         try

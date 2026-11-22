@@ -27,18 +27,23 @@ public sealed class RankService
         _logger = logger;
     }
 
-    public async Task EnsurePlayerLoadedAsync(PlayerIdentity identity, CancellationToken cancellationToken)
+    /// <summary>
+    /// Loads the stats of a session that the game thread already attached. This runs on
+    /// a background thread and must never touch the slot, the user id or the connected
+    /// flag: a player who left in the meantime would otherwise be resurrected.
+    /// </summary>
+    /// <returns><c>true</c> only when this call performed the load and it succeeded.</returns>
+    public async Task<bool> EnsurePlayerLoadedAsync(PlayerSession session, CancellationToken cancellationToken)
     {
-        var session = _sessionService.Attach(identity, DateTimeOffset.UtcNow);
         if (!session.BeginLoad())
         {
-            return;
+            return false;
         }
 
         try
         {
-            var statsTask = _repository.LoadPlayerStatsAsync(identity.SteamId, cancellationToken);
-            var weaponTask = _repository.LoadWeaponStatsAsync(identity.SteamId, cancellationToken);
+            var statsTask = _repository.LoadPlayerStatsAsync(session.SteamId, cancellationToken);
+            var weaponTask = _repository.LoadWeaponStatsAsync(session.SteamId, cancellationToken);
 
             await Task.WhenAll(statsTask, weaponTask);
 
@@ -47,15 +52,33 @@ public sealed class RankService
                 await statsTask,
                 await weaponTask,
                 DateTimeOffset.UtcNow);
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _sessionService.MarkPlayerLoadFailed(session);
+            return false;
         }
         catch (Exception exception)
         {
             _sessionService.MarkPlayerLoadFailed(session);
-            _logger.LogError(exception, "Failed to load rank data for {SteamId}.", identity.SteamId);
+
+            // With the database down every retry of every player fails: the full stack
+            // is logged once per session and the repeats are one short line.
+            if (session.LoadFailureCount <= 1)
+            {
+                _logger.LogError(exception, "Failed to load rank data for {SteamId}.", session.SteamId);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Failed again to load rank data for {SteamId} (attempt {Attempt}): {Message}",
+                    session.SteamId,
+                    session.LoadFailureCount,
+                    exception.Message);
+            }
+
+            return false;
         }
     }
 
@@ -189,32 +212,52 @@ public sealed class RankService
         return allSucceeded;
     }
 
-    public async Task<bool> ResetRankAsync(PlayerSession session, CancellationToken cancellationToken)
+    public async Task<ResetRankOutcome> ResetRankAsync(PlayerSession session, int cooldownDays, CancellationToken cancellationToken)
     {
-        await session.PersistenceLock.WaitAsync(cancellationToken);
-
         try
         {
-            if (!session.TryBeginReset(DateTimeOffset.UtcNow, out var snapshot))
-            {
-                return false;
-            }
-
-            await _repository.ResetRankAsync(snapshot, cancellationToken);
-            session.CompleteReset(snapshot, DateTimeOffset.UtcNow);
-            _sessionService.RemoveIfCompleted(session);
-            return true;
+            await session.PersistenceLock.WaitAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            session.CancelReset();
-            return false;
+            return ResetRankOutcome.Failed;
+        }
+
+        var started = false;
+
+        try
+        {
+            var rejection = session.TryBeginReset(DateTimeOffset.UtcNow, cooldownDays, out var snapshot);
+            if (rejection.HasValue)
+            {
+                return rejection.Value;
+            }
+
+            started = true;
+            await _repository.ResetRankAsync(snapshot, cancellationToken);
+            session.CompleteReset(snapshot, DateTimeOffset.UtcNow);
+            _sessionService.RemoveIfCompleted(session);
+            InvalidateLeaderboardCache();
+            return ResetRankOutcome.Success;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (started)
+            {
+                session.CancelReset();
+            }
+
+            return ResetRankOutcome.Failed;
         }
         catch (Exception exception)
         {
-            session.CancelReset();
+            if (started)
+            {
+                session.CancelReset();
+            }
+
             _logger.LogError(exception, "Failed to reset rank data for {SteamId}.", session.SteamId);
-            return false;
+            return ResetRankOutcome.Failed;
         }
         finally
         {
@@ -318,9 +361,26 @@ public sealed class RankService
         return null;
     }
 
-    public Task<int> PruneInactivePlayersAsync(int pruneDays, IReadOnlyCollection<string> excludedSteamIds, CancellationToken cancellationToken)
+    public async Task<int> PruneInactivePlayersAsync(int pruneDays, IReadOnlyCollection<string> excludedSteamIds, CancellationToken cancellationToken)
     {
-        return _repository.PruneInactivePlayersAsync(pruneDays, excludedSteamIds, cancellationToken);
+        var deleted = await _repository.PruneInactivePlayersAsync(pruneDays, excludedSteamIds, cancellationToken);
+        if (deleted > 0)
+        {
+            InvalidateLeaderboardCache();
+        }
+
+        return deleted;
+    }
+
+    /// <summary>
+    /// Drops every cached leaderboard, so a reset or a prune shows up in the next top.
+    /// </summary>
+    public void InvalidateLeaderboardCache()
+    {
+        lock (_leaderboardCache)
+        {
+            _leaderboardCache.Clear();
+        }
     }
 
     public RankServiceStatus GetStatus()

@@ -12,25 +12,50 @@ deploy/
 addons/
 runtimes/
 
-# Server/local data
-data/
-!Data/
-!Data/*.cs
+# Server/local data. The databases are covered by extension on purpose: a
+# `data/` rule would also hide the Data/ source folder on case-insensitive systems.
 *.sqlite
+*.sqlite3
 *.sqlite-shm
 *.sqlite-wal
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.sqlite-journal
+*-journal
+*.backup
+*.old
+
+# Real plugin configs (the samples/ folder is the tracked example)
+/umbrellaranked.json
+configs/
+
+# Private keys, certificates, tokens and credentials
+*.pem
+*.key
+*.pfx
+*.p12
+*.ppk
+id_rsa*
+id_ed25519*
+.env
+.env.*
+!.env.example
+credentials*
+secrets*
+*.secret
 
 # Logs and crash dumps
 logs/
 *.log
 *.dmp
 
-# User/editor files
+# User/editor and assistant files
 .vs/
 .vscode/
+.idea/
+.claude/
 *.user
 *.suo
 *.tmp

@@ -1,8 +1,22 @@
+using UmbrellaRanked.Utils;
+
 namespace UmbrellaRanked.Core;
 
 public sealed class WeaponStatsService
 {
+    // The weapon column is VARCHAR(64); a longer name would fail the whole save of the
+    // player under MySQL strict mode.
+    public const int MaxWeaponNameLength = 64;
+
     public string NormalizeWeaponName(string? rawWeapon)
+    {
+        var weapon = NormalizeWeaponNameCore(rawWeapon);
+        return weapon.Length > MaxWeaponNameLength
+            ? StringSanitizer.Truncate(weapon, MaxWeaponNameLength).TrimEnd()
+            : weapon;
+    }
+
+    private static string NormalizeWeaponNameCore(string? rawWeapon)
     {
         var weapon = (rawWeapon ?? string.Empty).Trim();
 

@@ -55,17 +55,24 @@ public static class StringSanitizer
         return value[..length];
     }
 
+    /// <summary>
+    /// Trims a resource path to precache. It is used as written: Source 2 resources live
+    /// under folders such as <c>sounds/</c>, so no prefix can be guessed.
+    /// </summary>
     public static string NormalizeOptionalSoundResource(string? resourcePath)
     {
-        var value = (resourcePath ?? string.Empty).Trim();
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
+        return (resourcePath ?? string.Empty).Trim();
+    }
 
-        return value.StartsWith("sound/", StringComparison.OrdinalIgnoreCase)
-            ? value
-            : $"sound/{value}";
+    /// <summary>
+    /// A sound <c>Value</c> is only a precachable resource when it points at a compiled
+    /// sound or a sound event file; anything else is a plain sample or event name.
+    /// </summary>
+    public static bool IsSoundResourceFile(string? value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        return trimmed.EndsWith(".vsnd_c", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.EndsWith(".vsndevts", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string NormalizeSoundSample(string? sample)

@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Core.Translations;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
+using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Localization;
@@ -20,12 +21,20 @@ using CssTimer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace UmbrellaRanked;
 
-[MinimumApiVersion(376)]
+[MinimumApiVersion(380)]
 public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRankedConfig>
 {
     private const int ConfigVersion = 1;
     private const int MinimumAllowedKillsRequired = 100;
     private const int MinimumAllowedPruneInactiveDays = 35;
+    private const double MinimumAllowedAutosaveIntervalSeconds = 10.0;
+    private const double MinimumAllowedPruneCheckIntervalHours = 0.1;
+    private const double MaximumAllowedTopCacheSeconds = 3600.0;
+    private const int MaximumAllowedPointValue = 10000;
+    private const int MaximumAllowedListSize = 500;
+    private const int MaximumAllowedSqliteBusyTimeoutSeconds = SqliteRankRepository.MaxBusyTimeoutSeconds;
+    private const double LoadRetryScanIntervalMilliseconds = 1000.0;
+    private const double MissingSteamIdWarningSeconds = 60.0;
     private const double MapEndFlushTimeoutSeconds = 10.0;
     private const double UnloadFlushTimeoutSeconds = 30.0;
     private const string TopPlayersMenuContext = "ranked.top.players";
@@ -61,12 +70,17 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private string _currentMapName = string.Empty;
     private bool _isUnloading;
     private bool _entitySystemReady;
-    private CCSGameRulesProxy? _gameRulesProxy;
     private bool _matchResultRecorded;
-    private ConVar? _teammatesAreEnemiesCvar;
+    private CachedBoolCvar? _teammatesAreEnemiesCvar;
+    private CachedBoolCvar? _svLanCvar;
+
+    // Players who reached connect_full without an authorized SteamID yet. Only touched
+    // on the game thread.
+    private readonly Dictionary<int, PendingIdentity> _pendingIdentitySlots = new();
+    private long _lastLoadRetryScanTick;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.1.0";
+    public override string ModuleVersion => "1.2.0";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -119,6 +133,15 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             Logger.LogWarning("AutosaveIntervalSeconds cannot be negative. Clamping to 0.");
             config.AutosaveIntervalSeconds = 0;
         }
+        else if (config.AutosaveIntervalSeconds > 0 && config.AutosaveIntervalSeconds < MinimumAllowedAutosaveIntervalSeconds)
+        {
+            // 0 keeps the autosave disabled; only positive values are clamped to the floor.
+            Logger.LogWarning(
+                "AutosaveIntervalSeconds cannot be lower than {Minimum} (0 disables it). Clamping to {Minimum}.",
+                MinimumAllowedAutosaveIntervalSeconds,
+                MinimumAllowedAutosaveIntervalSeconds);
+            config.AutosaveIntervalSeconds = MinimumAllowedAutosaveIntervalSeconds;
+        }
 
         if (config.PruneInactiveDays < 0)
         {
@@ -140,6 +163,14 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             Logger.LogWarning("PruneCheckIntervalHours cannot be negative. Clamping to 0.");
             config.PruneCheckIntervalHours = 0;
         }
+        else if (config.PruneCheckIntervalHours > 0 && config.PruneCheckIntervalHours < MinimumAllowedPruneCheckIntervalHours)
+        {
+            Logger.LogWarning(
+                "PruneCheckIntervalHours cannot be lower than {Minimum} (0 disables it). Clamping to {Minimum}.",
+                MinimumAllowedPruneCheckIntervalHours,
+                MinimumAllowedPruneCheckIntervalHours);
+            config.PruneCheckIntervalHours = MinimumAllowedPruneCheckIntervalHours;
+        }
 
         if (config.ResetRankCooldownDays < 0)
         {
@@ -152,17 +183,41 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             Logger.LogWarning("TopAnnouncementThreshold cannot be negative. Clamping to 0.");
             config.TopAnnouncementThreshold = 0;
         }
+        else if (config.TopAnnouncementThreshold > MaximumAllowedListSize)
+        {
+            Logger.LogWarning(
+                "TopAnnouncementThreshold cannot be higher than {Maximum}. Clamping to {Maximum}.",
+                MaximumAllowedListSize,
+                MaximumAllowedListSize);
+            config.TopAnnouncementThreshold = MaximumAllowedListSize;
+        }
 
         if (config.LeaderboardLimit <= 0)
         {
             Logger.LogWarning("LeaderboardLimit must be greater than 0. Resetting to 50.");
             config.LeaderboardLimit = 50;
         }
+        else if (config.LeaderboardLimit > MaximumAllowedListSize)
+        {
+            Logger.LogWarning(
+                "LeaderboardLimit cannot be higher than {Maximum}. Clamping to {Maximum}.",
+                MaximumAllowedListSize,
+                MaximumAllowedListSize);
+            config.LeaderboardLimit = MaximumAllowedListSize;
+        }
 
         if (config.TopCacheSeconds < 0)
         {
             Logger.LogWarning("TopCacheSeconds cannot be negative. Clamping to 0.");
             config.TopCacheSeconds = 0;
+        }
+        else if (config.TopCacheSeconds > MaximumAllowedTopCacheSeconds)
+        {
+            Logger.LogWarning(
+                "TopCacheSeconds cannot be higher than {Maximum}. Clamping to {Maximum}.",
+                MaximumAllowedTopCacheSeconds,
+                MaximumAllowedTopCacheSeconds);
+            config.TopCacheSeconds = MaximumAllowedTopCacheSeconds;
         }
 
         NormalizePointSettings(config.Points);
@@ -201,6 +256,18 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             throw new InvalidOperationException("SQLite mode requires Sqlite.FilePath to be configured.");
         }
 
+        if (config.DatabaseMode == DatabaseMode.Sqlite &&
+            (config.Sqlite.BusyTimeoutSeconds < 0 || config.Sqlite.BusyTimeoutSeconds > MaximumAllowedSqliteBusyTimeoutSeconds))
+        {
+            var clamped = Math.Clamp(config.Sqlite.BusyTimeoutSeconds, 0, MaximumAllowedSqliteBusyTimeoutSeconds);
+            Logger.LogWarning(
+                "Sqlite.BusyTimeoutSeconds must be between 0 and {Maximum}. Clamping {Value} to {Clamped}.",
+                MaximumAllowedSqliteBusyTimeoutSeconds,
+                config.Sqlite.BusyTimeoutSeconds,
+                clamped);
+            config.Sqlite.BusyTimeoutSeconds = clamped;
+        }
+
         Config = config;
     }
 
@@ -221,7 +288,9 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _entitySystemReady = hotReload || !string.IsNullOrEmpty(runningMap);
         _currentMapName = _entitySystemReady ? runningMap ?? string.Empty : string.Empty;
 
-        _sessionService = new PlayerSessionService(Logger);
+        _teammatesAreEnemiesCvar = new CachedBoolCvar("mp_teammates_are_enemies", Logger);
+        _svLanCvar = new CachedBoolCvar("sv_lan", Logger);
+        _sessionService = new PlayerSessionService(Logger, IsSvLanServer);
         _weaponStatsService = new WeaponStatsService();
         _commandCooldownService = new CommandCooldownService();
         _playtimeService = new PlaytimeService(Localizer);
@@ -247,6 +316,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         RestartPruneTimer();
 
         _loadConnectedPlayersWhenGlobalsAreReady = true;
+        _pendingIdentitySlots.Clear();
+        _lastLoadRetryScanTick = 0;
 
         Logger.LogInformation(
             "Umbrella Ranked {Version} loaded with the {Backend} backend (map: {Map}, hot reload: {HotReload}).",
@@ -462,6 +533,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private void OnClientDisconnect(int playerSlot)
     {
+        _pendingIdentitySlots.Remove(playerSlot);
+
         if (_sessionService == null)
         {
             return;
@@ -548,7 +621,6 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     {
         _currentMapName = mapName ?? string.Empty;
         _entitySystemReady = true;
-        _gameRulesProxy = null;
         _matchResultRecorded = false;
     }
 
@@ -571,6 +643,30 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         DrainMainThreadQueue();
         _wasdMenuService?.OnTick();
         LoadConnectedPlayersWhenGlobalsAreReady();
+        RetryPendingLoads();
+    }
+
+    private void OnClientAuthorized(int playerSlot, SteamID steamId)
+    {
+        // A player who reached connect_full before Steam authorized them is loaded as
+        // soon as the authorization arrives instead of waiting for the next scan.
+        if (_isUnloading || !_pendingIdentitySlots.ContainsKey(playerSlot))
+        {
+            return;
+        }
+
+        try
+        {
+            var player = Utilities.GetPlayerFromSlot(playerSlot);
+            if (IsRealPlayer(player))
+            {
+                StartPlayerLoad(player!);
+            }
+        }
+        catch (Exception exception)
+        {
+            Logger.LogDebug(exception, "Unable to load the authorized player in slot {Slot}.", playerSlot);
+        }
     }
 
     private void OnRankCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -638,6 +734,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return;
         }
 
+        if (!IsCompetitiveRankingEnabledForCurrentMap())
+        {
+            PrintLocalized(player!, "rank.disabled");
+            return;
+        }
+
         if (!Config.AllowResetRank)
         {
             PrintLocalized(player!, "reset.disabled");
@@ -654,9 +756,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var remaining = GetResetCooldownRemaining(stats.LastResetUnixTime);
         if (remaining.HasValue)
         {
-            var remainingDays = remaining.Value / 86400;
-            var remainingHours = (remaining.Value % 86400) / 3600;
-            PrintLocalized(player!, "reset.cooldown", remainingDays, remainingHours);
+            PrintResetCooldown(player!, remaining.Value);
             return;
         }
 
@@ -994,18 +1094,47 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var remaining = GetResetCooldownRemaining(stats.LastResetUnixTime);
         if (remaining.HasValue)
         {
-            QueueForSession(session, player =>
-            {
-                var remainingDays = remaining.Value / 86400;
-                var remainingHours = (remaining.Value % 86400) / 3600;
-                PrintLocalized(player, "reset.cooldown", remainingDays, remainingHours);
-            });
+            QueueForSession(session, player => PrintResetCooldown(player, remaining.Value));
 
             return;
         }
 
-        var success = await _rankService.ResetRankAsync(session, _shutdownToken);
-        QueueForSession(session, player => PrintLocalized(player, success ? "reset.success" : "reset.error"));
+        var outcome = await _rankService.ResetRankAsync(session, Config.ResetRankCooldownDays, _shutdownToken);
+        switch (outcome)
+        {
+            case ResetRankOutcome.Success:
+                QueueForSession(session, player => PrintLocalized(player, "reset.success"));
+                break;
+            case ResetRankOutcome.OnCooldown:
+                // A second confirmation that raced the first one: the cooldown is now
+                // running because the first reset finished while this one was waiting.
+                var lastResetUnixTime = _rankService.CaptureCurrentStats(session).LastResetUnixTime;
+                var cooldownRemaining = GetResetCooldownRemaining(lastResetUnixTime) ?? 3600;
+                QueueForSession(session, player => PrintResetCooldown(player, cooldownRemaining));
+                break;
+            case ResetRankOutcome.Busy:
+                QueueForSession(session, player => PrintLocalized(player, "reset.in_progress"));
+                break;
+            case ResetRankOutcome.NotLoaded:
+            default:
+                QueueForSession(session, player => PrintLocalized(player, "reset.error"));
+                break;
+        }
+    }
+
+    private void PrintResetCooldown(CCSPlayerController player, int remainingSeconds)
+    {
+        var days = remainingSeconds / 86400;
+        var hours = (remainingSeconds % 86400) / 3600;
+
+        // The message shows whole days and hours, so the last stretch reads as one hour
+        // instead of "0 days 0 hours".
+        if (days == 0 && hours == 0)
+        {
+            hours = 1;
+        }
+
+        PrintLocalized(player, "reset.cooldown", days, hours);
     }
 
     private async Task ExecuteWelcomeAnnouncementAsync(string steamId)
@@ -1119,11 +1248,105 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         if (!_sessionService.TryResolveIdentity(player, out var identity))
         {
+            TrackPendingIdentity(player);
             return false;
         }
 
-        RunBackground(() => LoadPlayerAndMaybeAnnounceAsync(identity), $"load {identity.SteamId}");
+        _pendingIdentitySlots.Remove(identity.Slot);
+
+        // Attached here, on the game thread, never in the background task: a task that
+        // attaches after the player left would mark the session connected for good.
+        var session = _sessionService.Attach(identity, DateTimeOffset.UtcNow);
+        RunBackground(() => LoadPlayerAndMaybeAnnounceAsync(session), $"load {identity.SteamId}");
         return true;
+    }
+
+    private void TrackPendingIdentity(CCSPlayerController player)
+    {
+        if (!IsRealPlayer(player))
+        {
+            return;
+        }
+
+        _pendingIdentitySlots.TryAdd(player.Slot, new PendingIdentity(DateTimeOffset.UtcNow));
+    }
+
+    /// <summary>
+    /// Runs on the game thread from OnTick, at most once a second and without extra
+    /// timers: loads players whose SteamID got authorized late and retries the loads
+    /// that failed, with the backoff each session keeps.
+    /// </summary>
+    private void RetryPendingLoads()
+    {
+        if (_isUnloading || _sessionService == null || _rankService == null)
+        {
+            return;
+        }
+
+        var nowTick = Environment.TickCount64;
+        if (nowTick - _lastLoadRetryScanTick < LoadRetryScanIntervalMilliseconds)
+        {
+            return;
+        }
+
+        _lastLoadRetryScanTick = nowTick;
+        var nowUtc = DateTimeOffset.UtcNow;
+
+        if (_pendingIdentitySlots.Count > 0)
+        {
+            foreach (var (slot, pending) in _pendingIdentitySlots.ToArray())
+            {
+                CCSPlayerController? player = null;
+                try
+                {
+                    player = Utilities.GetPlayerFromSlot(slot);
+                }
+                catch (Exception exception)
+                {
+                    Logger.LogDebug(exception, "Unable to resolve pending player slot {Slot}.", slot);
+                }
+
+                if (!IsRealPlayer(player))
+                {
+                    _pendingIdentitySlots.Remove(slot);
+                    continue;
+                }
+
+                if (StartPlayerLoad(player!))
+                {
+                    continue;
+                }
+
+                if (!pending.Warned && (nowUtc - pending.Since).TotalSeconds >= MissingSteamIdWarningSeconds)
+                {
+                    pending.Warned = true;
+                    Logger.LogWarning(
+                        "Player in slot {Slot} has been connected for over {Seconds}s without an authorized SteamID. Their stats are not tracked until Steam authorizes them.",
+                        slot,
+                        MissingSteamIdWarningSeconds);
+                }
+            }
+        }
+
+        foreach (var session in _sessionService.GetSessionsDueForLoadRetry(nowUtc))
+        {
+            if (_sessionService.TryGetConnectedPlayer(session, out var player))
+            {
+                // Deferred first: the load only starts on the thread pool, and until it does
+                // the session still looks due to the next scan.
+                session.DeferLoadRetry(nowUtc, TimeSpan.FromSeconds(10));
+                if (session.LoadFailureCount == 1)
+                {
+                    Logger.LogInformation("Retrying the failed rank data load of {SteamId}.", session.SteamId);
+                }
+                StartPlayerLoad(player);
+            }
+        }
+    }
+
+    private bool IsSvLanServer()
+    {
+        return _svLanCvar?.Read(_currentMapName) == true;
     }
 
     private void OpenTopPlayersMenu(CCSPlayerController player, IReadOnlyList<TopEntry> entries)
@@ -1149,7 +1372,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _wasdMenuService!.Open(player, new WasdMenuPage(
             Localizer.ForPlayer(player, "top.title"),
             items,
-            $"{Localizer.ForPlayer(player, "top.subtitle", Config.RankingMode, Config.MinimumKillsRequired)}",
+            $"{Localizer.ForPlayer(player, "top.subtitle", Localizer.ForPlayer(player, Config.RankingMode == RankingMode.Kda ? "top.mode.kda" : "top.mode.points"), Config.MinimumKillsRequired)}",
             Localizer.ForPlayer(player, "top.empty"),
             TopPlayersMenuContext));
     }
@@ -1433,7 +1656,13 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             // still loading does not consume the player's real command cooldown.
             if (_commandCooldownService.TryConsumeLoadingNotice(identity.SteamId, Config.CommandCooldownSeconds))
             {
-                StartPlayerLoad(player!);
+                // Once a load has failed, the retry scan owns it, so spamming a command
+                // during a database outage cannot bypass the backoff.
+                if (session == null || session.LoadFailureCount == 0)
+                {
+                    StartPlayerLoad(player!);
+                }
+
                 PrintLocalized(player!, "data.loading");
             }
 
@@ -1543,6 +1772,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
         RegisterListener<Listeners.OnServerPrecacheResources>(OnServerPrecacheResources);
         RegisterListener<Listeners.OnTick>(OnTick);
+        RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
     }
 
     private void OnCompetitiveEnabledCvarChanged(object? sender, bool enabled)
@@ -1612,16 +1842,21 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
     }
 
-    private async Task LoadPlayerAndMaybeAnnounceAsync(PlayerIdentity identity)
+    private async Task LoadPlayerAndMaybeAnnounceAsync(PlayerSession session)
     {
-        await _rankService!.EnsurePlayerLoadedAsync(identity, _shutdownToken);
+        // Only the call that actually performed the load announces: a repeated request
+        // for a session that is already loaded or loading must not announce again.
+        if (!await _rankService!.EnsurePlayerLoadedAsync(session, _shutdownToken))
+        {
+            return;
+        }
 
         if (!IsCompetitiveRankingEnabledForCurrentMap() || Config.TopAnnouncementThreshold <= 0 || _sessionService == null)
         {
             return;
         }
 
-        if (!_sessionService.TryGetSessionBySteamId(identity.SteamId, out var session) || !session.IsLoaded)
+        if (!session.IsLoaded || !session.IsConnected)
         {
             return;
         }
@@ -1633,7 +1868,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
 
         await Task.Delay(TimeSpan.FromSeconds(3), _shutdownToken);
-        await ExecuteWelcomeAnnouncementAsync(identity.SteamId);
+        await ExecuteWelcomeAnnouncementAsync(session.SteamId);
     }
 
     private IRankRepository CreateRepository()
@@ -1690,22 +1925,16 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private bool AreTeammatesEnemies()
     {
-        _teammatesAreEnemiesCvar ??= ConVar.Find("mp_teammates_are_enemies");
-        return _teammatesAreEnemiesCvar?.GetPrimitiveValue<bool>() == true;
+        return _teammatesAreEnemiesCvar?.Read(_currentMapName) == true;
     }
 
     private bool IsWarmupPeriod()
     {
         try
         {
-            if (_gameRulesProxy is not { IsValid: true })
-            {
-                _gameRulesProxy = Utilities
-                    .FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
-                    .FirstOrDefault();
-            }
-
-            return _gameRulesProxy?.GameRules?.WarmupPeriod == true;
+            // Cached by CounterStrikeSharp and null while the entity system or the map
+            // are not ready, which reads as "not in warmup".
+            return Utilities.GetGameRules()?.WarmupPeriod == true;
         }
         catch (Exception exception)
         {
@@ -1929,13 +2158,23 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
     private int ClampPointValue(int value, string settingName)
     {
-        if (value >= 0)
+        if (value < 0)
         {
-            return value;
+            Logger.LogWarning("Points.{SettingName} cannot be negative. Clamping to 0.", settingName);
+            return 0;
         }
 
-        Logger.LogWarning("Points.{SettingName} cannot be negative. Clamping to 0.", settingName);
-        return 0;
+        if (value > MaximumAllowedPointValue)
+        {
+            Logger.LogWarning(
+                "Points.{SettingName} cannot be higher than {Maximum}. Clamping to {Maximum}.",
+                settingName,
+                MaximumAllowedPointValue,
+                MaximumAllowedPointValue);
+            return MaximumAllowedPointValue;
+        }
+
+        return value;
     }
 
     private TimeSpan GetTopCacheTtl()
@@ -2084,18 +2323,17 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             return string.Empty;
         }
 
+        // An explicit ResourcePath is precached exactly as written.
         if (!string.IsNullOrWhiteSpace(Config.Top1Sound.ResourcePath))
         {
             return StringSanitizer.NormalizeOptionalSoundResource(Config.Top1Sound.ResourcePath);
         }
 
-        var value = StringSanitizer.NormalizeSoundSample(Config.Top1Sound.Value);
-        if (string.IsNullOrEmpty(value) || !(value.Contains('/') || value.Contains('.')))
-        {
-            return string.Empty;
-        }
-
-        return StringSanitizer.NormalizeOptionalSoundResource(value);
+        // Without one, Value is only a resource when it names a compiled sound file; a
+        // sound event name has nothing to precache.
+        return StringSanitizer.IsSoundResourceFile(Config.Top1Sound.Value)
+            ? StringSanitizer.NormalizeOptionalSoundResource(Config.Top1Sound.Value)
+            : string.Empty;
     }
 
     private void PlayTop1Sound()
@@ -2182,6 +2420,78 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private static bool IsGlobalVariablesNotReady(Exception exception)
     {
         return exception.Message.Contains("Global Variables not initialized yet", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A boolean console variable looked up once. When the lookup fails it is not repeated
+    /// on every call: it is warned about once and tried again at most once per map.
+    /// </summary>
+    private sealed class CachedBoolCvar(string name, ILogger logger)
+    {
+        private ConVar<bool>? _cvar;
+        private bool _lookupFailed;
+        private string _failedOnMap = string.Empty;
+        private bool _warned;
+
+        public bool Read(string currentMap)
+        {
+            if (_cvar == null)
+            {
+                if (_lookupFailed && string.Equals(_failedOnMap, currentMap, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                try
+                {
+                    _cvar = ConVar<bool>.Find(name);
+                }
+                catch (Exception exception)
+                {
+                    logger.LogDebug(exception, "ConVar lookup for {Name} threw.", name);
+                }
+
+                if (_cvar == null)
+                {
+                    return MarkFailed(currentMap);
+                }
+
+                _lookupFailed = false;
+            }
+
+            try
+            {
+                return _cvar.Value;
+            }
+            catch (Exception exception)
+            {
+                // Find also returns a handle for a cvar of another type; reading it is what
+                // throws, so this is a failed lookup too and is retried on the next map.
+                logger.LogDebug(exception, "Reading {Name} failed.", name);
+                _cvar = null;
+                return MarkFailed(currentMap);
+            }
+        }
+
+        private bool MarkFailed(string currentMap)
+        {
+            _lookupFailed = true;
+            _failedOnMap = currentMap;
+            if (!_warned)
+            {
+                _warned = true;
+                logger.LogWarning("Console variable {Name} could not be resolved as a boolean; it is read as 0 until a later map finds it.", name);
+            }
+
+            return false;
+        }
+    }
+
+    private sealed class PendingIdentity(DateTimeOffset since)
+    {
+        public DateTimeOffset Since { get; } = since;
+
+        public bool Warned { get; set; }
     }
 
     private sealed record WeaponCategoryDefinition(string Id, string TitleKey);
