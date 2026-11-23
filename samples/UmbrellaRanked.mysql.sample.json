@@ -27,6 +27,10 @@
     "BombDefuse": 3,
     "BombExplode": 3,
     "HostageRescue": 3,
+    "HostagePickUp": 0,
+    "HostageKillPenalty": 0,
+    "C4PickUp": 0,
+    "C4DropPenalty": 0,
     "TeamWin": 1,
     "TeamLossPenalty": 1
   },

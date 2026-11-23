@@ -153,6 +153,18 @@ public sealed class UmbrellaRankedConfig : BasePluginConfig
         [JsonPropertyName("HostageRescue")]
         public int HostageRescue { get; set; } = 3;
 
+        [JsonPropertyName("HostagePickUp")]
+        public int HostagePickUp { get; set; }
+
+        [JsonPropertyName("HostageKillPenalty")]
+        public int HostageKillPenalty { get; set; }
+
+        [JsonPropertyName("C4PickUp")]
+        public int C4PickUp { get; set; }
+
+        [JsonPropertyName("C4DropPenalty")]
+        public int C4DropPenalty { get; set; }
+
         [JsonPropertyName("TeamWin")]
         public int TeamWin { get; set; } = 1;
 

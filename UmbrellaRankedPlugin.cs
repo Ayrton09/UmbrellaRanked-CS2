@@ -71,6 +71,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
     private bool _entitySystemReady;
     private bool _matchResultRecorded;
+
+    // Objective rewards that can be farmed are paid once per round. Game thread only.
+    private readonly HashSet<int> _rewardedHostagesThisRound = new();
+    private readonly HashSet<int> _c4PickUpRewardedSlotsThisRound = new();
     private CachedBoolCvar? _teammatesAreEnemiesCvar;
     private CachedBoolCvar? _svLanCvar;
 
@@ -80,7 +84,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private long _lastLoadRetryScanTick;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.2.0";
+    public override string ModuleVersion => "1.3.0";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -492,6 +496,98 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     }
 
     [GameEventHandler]
+    public HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
+    {
+        ResetObjectiveRoundState();
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnHostageFollows(EventHostageFollows @event, GameEventInfo info)
+    {
+        // Paid once per hostage and round, so picking the same hostage up again (or
+        // passing it between teammates) earns nothing more.
+        if (Config.Points.HostagePickUp > 0 &&
+            TryGetCompetitiveRankService(out var rankService) &&
+            IsRealPlayer(@event.Userid) &&
+            _rewardedHostagesThisRound.Add(@event.Hostage))
+        {
+            rankService.TryRecordPoints(@event.Userid!, Config.Points.HostagePickUp);
+        }
+
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnHostageKilled(EventHostageKilled @event, GameEventInfo info)
+    {
+        if (Config.Points.HostageKillPenalty > 0 &&
+            TryGetCompetitiveRankService(out var rankService) &&
+            IsRealPlayer(@event.Userid))
+        {
+            rankService.TryRecordPoints(@event.Userid!, -Config.Points.HostageKillPenalty);
+        }
+
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnBombPickup(EventBombPickup @event, GameEventInfo info)
+    {
+        // The bomb handed out at spawn fires bomb_pickup too, during the freeze period,
+        // so freeze time is skipped. Each player is paid once per round at most.
+        var player = @event.Userid;
+        if (Config.Points.C4PickUp > 0 &&
+            !IsFreezePeriod() &&
+            TryGetCompetitiveRankService(out var rankService) &&
+            IsRealPlayer(player) &&
+            _c4PickUpRewardedSlotsThisRound.Add(player!.Slot))
+        {
+            rankService.TryRecordPoints(player, Config.Points.C4PickUp);
+        }
+
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
+    public HookResult OnBombDropped(EventBombDropped @event, GameEventInfo info)
+    {
+        // A carrier who is killed drops the bomb too, and that costs nothing: the event
+        // fires with the pawn already dying. Freeze time handoffs are not counted either,
+        // matching C4PickUp.
+        var player = @event.Userid;
+        if (Config.Points.C4DropPenalty > 0 &&
+            !IsFreezePeriod() &&
+            TryGetCompetitiveRankService(out var rankService) &&
+            IsRealPlayer(player) &&
+            IsPlayerAlive(player!))
+        {
+            rankService.TryRecordPoints(player!, -Config.Points.C4DropPenalty);
+        }
+
+        return HookResult.Continue;
+    }
+
+    private static bool IsPlayerAlive(CCSPlayerController player)
+    {
+        var pawn = player.PlayerPawn.Value;
+        return pawn is { IsValid: true } && pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE;
+    }
+
+    private bool IsFreezePeriod()
+    {
+        try
+        {
+            return Utilities.GetGameRules()?.FreezePeriod == true;
+        }
+        catch (Exception exception)
+        {
+            Logger.LogDebug(exception, "Unable to read the freeze period state.");
+            return false;
+        }
+    }
+
+    [GameEventHandler]
     public HookResult OnRoundEnd(EventRoundEnd @event, GameEventInfo info)
     {
         if (TryGetCompetitiveRankService(out var rankService))
@@ -622,6 +718,13 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _currentMapName = mapName ?? string.Empty;
         _entitySystemReady = true;
         _matchResultRecorded = false;
+        ResetObjectiveRoundState();
+    }
+
+    private void ResetObjectiveRoundState()
+    {
+        _rewardedHostagesThisRound.Clear();
+        _c4PickUpRewardedSlotsThisRound.Clear();
     }
 
     private void OnServerPrecacheResources(ResourceManifest manifest)
@@ -2152,6 +2255,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         points.BombDefuse = ClampPointValue(points.BombDefuse, nameof(points.BombDefuse));
         points.BombExplode = ClampPointValue(points.BombExplode, nameof(points.BombExplode));
         points.HostageRescue = ClampPointValue(points.HostageRescue, nameof(points.HostageRescue));
+        points.HostagePickUp = ClampPointValue(points.HostagePickUp, nameof(points.HostagePickUp));
+        points.HostageKillPenalty = ClampPointValue(points.HostageKillPenalty, nameof(points.HostageKillPenalty));
+        points.C4PickUp = ClampPointValue(points.C4PickUp, nameof(points.C4PickUp));
+        points.C4DropPenalty = ClampPointValue(points.C4DropPenalty, nameof(points.C4DropPenalty));
         points.TeamWin = ClampPointValue(points.TeamWin, nameof(points.TeamWin));
         points.TeamLossPenalty = ClampPointValue(points.TeamLossPenalty, nameof(points.TeamLossPenalty));
     }

@@ -124,6 +124,11 @@ Replace the plugin folder contents with the new release (keep `data/` if you use
 > [!IMPORTANT]
 > Always replace `lang/` too. Missing keys fall back to the raw key name in chat.
 
+**From 1.2.x to 1.3.0**
+
+- No database, `lang/` or dependency changes.
+- Four new point settings, all `0` (off) by default: `HostagePickUp`, `HostageKillPenalty`, `C4PickUp` and `C4DropPenalty`. Add them to your config to turn them on; see [Points](#points).
+
 **From 1.1.x to 1.2.0**
 
 - Requires CounterStrikeSharp `1.0.380` or newer.
@@ -294,6 +299,10 @@ The recommended `SoundEvent` setup is a sound event file in `ResourcePath` (for 
   "BombDefuse": 3,
   "BombExplode": 3,
   "HostageRescue": 3,
+  "HostagePickUp": 0,
+  "HostageKillPenalty": 0,
+  "C4PickUp": 0,
+  "C4DropPenalty": 0,
   "TeamWin": 1,
   "TeamLossPenalty": 1
 }
@@ -315,6 +324,17 @@ With the defaults above:
 | Assist | `+1` | none |
 | Round MVP, bomb planted, defused or exploded, hostage rescued | the matching value | none |
 | Round won or lost | `+1` for each player on the winning team, `-1` for each on the losing team | |
+
+The hostage and bomb handling values are `0` (off) by default. Set them to turn them on:
+
+| Setting | Who | When |
+| --- | --- | --- |
+| `HostagePickUp` | `+` the player who picks up the hostage | Once per hostage and round, so picking the same hostage up again pays nothing |
+| `HostageKillPenalty` | `-` the player who kills a hostage | Every hostage killed. Hostages only take damage with `mp_hostages_takedamage 1`, which is off by default in CS2 |
+| `C4PickUp` | `+` the player who picks up the bomb | Once per player and round. The bomb handed out at spawn does not count |
+| `C4DropPenalty` | `-` the player who drops the bomb | Every drop while alive. Dropping it by getting killed costs nothing |
+
+Bomb pickups and drops during freeze time are ignored, so handing the bomb to a teammate before the round starts is free.
 
 Bonuses stack for the attacker. For the victim, a normal or headshot kill costs just `DeathPenalty`, but a knife or zeus kill costs exactly what it gave the attacker, and that includes the `HeadshotBonus` when the kill was a headshot.
 
