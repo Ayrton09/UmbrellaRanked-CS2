@@ -28,6 +28,7 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             matches_won INTEGER NOT NULL DEFAULT 0,
             matches_lost INTEGER NOT NULL DEFAULT 0,
             matches_tied INTEGER NOT NULL DEFAULT 0,
+            teamkills INTEGER NOT NULL DEFAULT 0,
             playtime INTEGER NOT NULL DEFAULT 0,
             last_seen INTEGER NOT NULL DEFAULT 0,
             last_reset INTEGER NOT NULL DEFAULT 0
@@ -43,8 +44,8 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
         );
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @Headshots, @Mvps, @RoundsWon, @RoundsLost, @RoundsCt, @RoundsT, @MatchesWon, @MatchesLost, @MatchesTied, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, teamkills, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @Headshots, @Mvps, @RoundsWon, @RoundsLost, @RoundsCt, @RoundsT, @MatchesWon, @MatchesLost, @MatchesTied, @Teamkills, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
         ON CONFLICT(steamid) DO UPDATE SET
             name = excluded.name,
             kills = excluded.kills,
@@ -60,6 +61,7 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             matches_won = excluded.matches_won,
             matches_lost = excluded.matches_lost,
             matches_tied = excluded.matches_tied,
+            teamkills = excluded.teamkills,
             playtime = excluded.playtime,
             last_seen = excluded.last_seen,
             last_reset = excluded.last_reset;
@@ -72,8 +74,8 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             headshots = excluded.headshots;
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, teamkills, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
         ON CONFLICT(steamid) DO UPDATE SET
             name = excluded.name,
             kills = 0,
@@ -89,6 +91,7 @@ internal sealed class SqliteRankRepository : DapperRankRepositoryBase
             matches_won = 0,
             matches_lost = 0,
             matches_tied = 0,
+            teamkills = 0,
             playtime = excluded.playtime,
             last_seen = excluded.last_seen,
             last_reset = excluded.last_reset;

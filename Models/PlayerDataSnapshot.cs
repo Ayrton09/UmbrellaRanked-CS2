@@ -16,6 +16,7 @@ public sealed record PlayerDataSnapshot(
     int MatchesWon,
     int MatchesLost,
     int MatchesTied,
+    int Teamkills,
     int PlaytimeSeconds,
     int LastSeenUnixTime,
     int LastResetUnixTime,

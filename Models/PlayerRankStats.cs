@@ -32,6 +32,8 @@ public sealed class PlayerRankStats
 
     public int MatchesTied { get; set; }
 
+    public int Teamkills { get; set; }
+
     public int PlaytimeSeconds { get; set; }
 
     public int LastSeenUnixTime { get; set; }
@@ -41,4 +43,6 @@ public sealed class PlayerRankStats
     public double Kda => Deaths > 0 ? (double)(Kills + Assists) / Deaths : Kills + Assists;
 
     public double HeadshotPercentage => Kills > 0 ? Headshots * 100.0 / Kills : 0;
+
+    public double TeamkillPercentage => Kills > 0 ? Teamkills * 100.0 / Kills : 0;
 }

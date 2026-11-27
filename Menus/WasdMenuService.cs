@@ -47,6 +47,11 @@ public sealed class WasdMenuService : IDisposable
             : TimeSpan.FromMilliseconds(Math.Max(16, renderIntervalMilliseconds));
     }
 
+    /// <summary>
+    /// Localized "close" hint of the empty-menu screen; English when not set.
+    /// </summary>
+    public Func<CCSPlayerController, string>? CloseLabel { get; set; }
+
     public bool IsOpen(CCSPlayerController player)
     {
         return IsValidPlayer(player) && _states.TryGetValue(player.Slot, out var state) && state.UserId == player.UserId;
@@ -225,7 +230,13 @@ public sealed class WasdMenuService : IDisposable
             try
             {
                 HandleButtonInput(player, state, now);
-                Render(player, state, force: false);
+
+                // The input may have closed this menu or replaced it with a new one;
+                // rendering the stale state would leave a closed menu drawn for seconds.
+                if (_states.TryGetValue(player.Slot, out var current) && ReferenceEquals(current, state))
+                {
+                    Render(player, state, force: false);
+                }
             }
             catch (Exception)
             {
@@ -463,7 +474,7 @@ public sealed class WasdMenuService : IDisposable
         if (items.Count == 0)
         {
             lines.Add($"<font color='#fbbf24'>{Escape(CompactText(page.EmptyText, MaxMenuLineCharacters))}</font>");
-            lines.Add("<font color='#fcd34d'>Jump/Duck</font> close");
+            lines.Add($"<font color='#fcd34d'>Jump/Duck</font> {Escape(GetCloseLabel(player))}");
         }
         else
         {
@@ -483,6 +494,19 @@ public sealed class WasdMenuService : IDisposable
         }
 
         TryPrintToCenterHtml(player, string.Join("<br>", lines));
+    }
+
+    private string GetCloseLabel(CCSPlayerController player)
+    {
+        try
+        {
+            var label = CloseLabel?.Invoke(player);
+            return string.IsNullOrWhiteSpace(label) ? "close" : label;
+        }
+        catch (Exception)
+        {
+            return "close";
+        }
     }
 
     private void Freeze(CCSPlayerController player, bool freeze)

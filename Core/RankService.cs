@@ -102,6 +102,16 @@ public sealed class RankService
         return session.TryApplyMvp(points);
     }
 
+    public bool TryRecordTeamKill(CCSPlayerController player, int penaltyPoints)
+    {
+        if (!_sessionService.TryGetSession(player, out var session))
+        {
+            return false;
+        }
+
+        return session.TryApplyTeamKill(penaltyPoints);
+    }
+
     public bool TryRecordRoundResult(CCSPlayerController player, bool playedAsCounterTerrorist, bool won, int points)
     {
         if (!_sessionService.TryGetSession(player, out var session))
@@ -265,36 +275,36 @@ public sealed class RankService
         }
     }
 
-    public Task<int?> GetRankPositionAsync(string steamId, int minimumKills, RankingMode rankingMode, CancellationToken cancellationToken)
+    public Task<int?> GetRankPositionAsync(string steamId, int minimumKills, RankingMode rankingMode, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        return _repository.GetRankPositionAsync(steamId, minimumKills, rankingMode, cancellationToken);
+        return _repository.GetRankPositionAsync(steamId, minimumKills, rankingMode, hideInactiveDays, cancellationToken);
     }
 
-    public Task<IReadOnlyList<TopEntry>> GetTopPlayersAsync(int minimumKills, int limit, RankingMode rankingMode, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<TopEntry>> GetTopPlayersAsync(int minimumKills, int limit, RankingMode rankingMode, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        return _repository.GetTopPlayersAsync(minimumKills, limit, rankingMode, cancellationToken);
+        return _repository.GetTopPlayersAsync(minimumKills, limit, rankingMode, hideInactiveDays, cancellationToken);
     }
 
-    public Task<IReadOnlyList<TopEntry>> GetTopPlayersCachedAsync(int minimumKills, int limit, RankingMode rankingMode, TimeSpan cacheTtl, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<TopEntry>> GetTopPlayersCachedAsync(int minimumKills, int limit, RankingMode rankingMode, int hideInactiveDays, TimeSpan cacheTtl, CancellationToken cancellationToken)
     {
         return GetCachedAsync(
-            $"top:players:{minimumKills}:{limit}:{rankingMode}",
+            $"top:players:{minimumKills}:{limit}:{rankingMode}:{hideInactiveDays}",
             cacheTtl,
-            () => _repository.GetTopPlayersAsync(minimumKills, limit, rankingMode, cancellationToken),
+            () => _repository.GetTopPlayersAsync(minimumKills, limit, rankingMode, hideInactiveDays, cancellationToken),
             cancellationToken);
     }
 
-    public Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeAsync(int limit, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeAsync(int limit, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        return _repository.GetTopPlaytimeAsync(limit, cancellationToken);
+        return _repository.GetTopPlaytimeAsync(limit, hideInactiveDays, cancellationToken);
     }
 
-    public Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeCachedAsync(int limit, TimeSpan cacheTtl, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeCachedAsync(int limit, int hideInactiveDays, TimeSpan cacheTtl, CancellationToken cancellationToken)
     {
         return GetCachedAsync(
-            $"top:playtime:{limit}",
+            $"top:playtime:{limit}:{hideInactiveDays}",
             cacheTtl,
-            () => _repository.GetTopPlaytimeAsync(limit, cancellationToken),
+            () => _repository.GetTopPlaytimeAsync(limit, hideInactiveDays, cancellationToken),
             cancellationToken);
     }
 
@@ -312,31 +322,40 @@ public sealed class RankService
             cancellationToken);
     }
 
-    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponAsync(string weapon, int limit, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponAsync(string weapon, int limit, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        return _repository.GetTopWeaponAsync(weapon, limit, cancellationToken);
+        return _repository.GetTopWeaponAsync(weapon, limit, hideInactiveDays, cancellationToken);
     }
 
-    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCachedAsync(string weapon, int limit, TimeSpan cacheTtl, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCachedAsync(string weapon, int limit, int hideInactiveDays, TimeSpan cacheTtl, CancellationToken cancellationToken)
     {
         return GetCachedAsync(
-            $"top:weapon:{weapon}:{limit}",
+            $"top:weapon:{weapon}:{limit}:{hideInactiveDays}",
             cacheTtl,
-            () => _repository.GetTopWeaponAsync(weapon, limit, cancellationToken),
+            () => _repository.GetTopWeaponAsync(weapon, limit, hideInactiveDays, cancellationToken),
             cancellationToken);
     }
 
-    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCategoryCachedAsync(IReadOnlyCollection<string> weapons, int limit, TimeSpan cacheTtl, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCategoryCachedAsync(IReadOnlyCollection<string> weapons, int limit, int hideInactiveDays, TimeSpan cacheTtl, CancellationToken cancellationToken)
     {
         var keyWeapons = string.Join(",", weapons.OrderBy(weapon => weapon, StringComparer.Ordinal));
         return GetCachedAsync(
-            $"top:weapon-category:{keyWeapons}:{limit}",
+            $"top:weapon-category:{keyWeapons}:{limit}:{hideInactiveDays}",
             cacheTtl,
-            () => _repository.GetTopWeaponCategoryAsync(weapons, limit, cancellationToken),
+            () => _repository.GetTopWeaponCategoryAsync(weapons, limit, hideInactiveDays, cancellationToken),
             cancellationToken);
     }
 
-    public async Task<int?> GetWelcomePositionAsync(PlayerSession session, int minimumKills, int topCount, RankingMode rankingMode, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<TeamkillTopEntry>> GetTopTeamkillsCachedAsync(int minimumKills, int limit, int hideInactiveDays, TimeSpan cacheTtl, CancellationToken cancellationToken)
+    {
+        return GetCachedAsync(
+            $"top:teamkills:{minimumKills}:{limit}:{hideInactiveDays}",
+            cacheTtl,
+            () => _repository.GetTopTeamkillsAsync(minimumKills, limit, hideInactiveDays, cancellationToken),
+            cancellationToken);
+    }
+
+    public async Task<int?> GetWelcomePositionAsync(PlayerSession session, int minimumKills, int topCount, RankingMode rankingMode, int hideInactiveDays, CancellationToken cancellationToken)
     {
         if (topCount <= 0)
         {
@@ -349,7 +368,7 @@ public sealed class RankService
             return null;
         }
 
-        var topSteamIds = await _repository.GetTopSteamIdsAsync(minimumKills, topCount, rankingMode, cancellationToken);
+        var topSteamIds = await _repository.GetTopSteamIdsAsync(minimumKills, topCount, rankingMode, hideInactiveDays, session.SteamId, cancellationToken);
         for (var index = 0; index < topSteamIds.Count; index++)
         {
             if (string.Equals(topSteamIds[index], session.SteamId, StringComparison.Ordinal))

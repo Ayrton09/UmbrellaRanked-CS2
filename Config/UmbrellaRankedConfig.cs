@@ -31,6 +31,9 @@ public sealed class UmbrellaRankedConfig : BasePluginConfig
     [JsonPropertyName("RankingMode")]
     public RankingMode RankingMode { get; set; } = RankingMode.Points;
 
+    [JsonPropertyName("BotKillPoints")]
+    public bool BotKillPoints { get; set; } = true;
+
     [JsonPropertyName("Points")]
     public PointsSettings Points { get; set; } = new();
 
@@ -42,6 +45,9 @@ public sealed class UmbrellaRankedConfig : BasePluginConfig
 
     [JsonPropertyName("PruneInactiveDays")]
     public int PruneInactiveDays { get; set; } = 35;
+
+    [JsonPropertyName("PruneMode")]
+    public PruneMode PruneMode { get; set; } = PruneMode.Delete;
 
     [JsonPropertyName("PruneOnStartup")]
     public bool PruneOnStartup { get; set; } = false;
@@ -98,6 +104,9 @@ public sealed class UmbrellaRankedConfig : BasePluginConfig
 
         [JsonPropertyName("MaximumPoolSize")]
         public uint MaximumPoolSize { get; set; } = 50;
+
+        [JsonPropertyName("SslMode")]
+        public DatabaseSslMode SslMode { get; set; } = DatabaseSslMode.Preferred;
     }
 
     public sealed class SqliteConnectionSettings

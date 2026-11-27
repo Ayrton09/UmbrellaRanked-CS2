@@ -8,6 +8,12 @@ namespace UmbrellaRanked.Data;
 
 internal abstract class DapperRankRepositoryBase : IRankRepository
 {
+    // Not const so the test harness can shrink it; production always uses 5000.
+    internal static int PruneBatchSize { get; set; } = 5000;
+
+    // Test seam, null in production: runs between a batch SELECT and its DELETE.
+    internal static Func<IReadOnlyList<string>, Task>? PruneAfterSelectHook { get; set; }
+
     private readonly ILogger _logger;
 
     protected DapperRankRepositoryBase(ILogger logger)
@@ -49,6 +55,7 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
                 COALESCE(matches_won, 0) AS MatchesWon,
                 COALESCE(matches_lost, 0) AS MatchesLost,
                 COALESCE(matches_tied, 0) AS MatchesTied,
+                COALESCE(teamkills, 0) AS Teamkills,
                 COALESCE(playtime, 0) AS PlaytimeSeconds,
                 COALESCE(last_seen, 0) AS LastSeenUnixTime,
                 COALESCE(last_reset, 0) AS LastResetUnixTime
@@ -112,9 +119,7 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch
         {
-            // Never the caller's token: on shutdown it is already cancelled and the
-            // rollback would throw over the exception that actually caused it.
-            await transaction.RollbackAsync(CancellationToken.None);
+            await SchemaInitializer.RollbackQuietlyAsync(transaction, _logger);
             throw;
         }
     }
@@ -144,22 +149,22 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch
         {
-            // Never the caller's token: on shutdown it is already cancelled and the
-            // rollback would throw over the exception that actually caused it.
-            await transaction.RollbackAsync(CancellationToken.None);
+            await SchemaInitializer.RollbackQuietlyAsync(transaction, _logger);
             throw;
         }
     }
 
-    public async Task<int?> GetRankPositionAsync(string steamId, int minimumKills, RankingMode rankingMode, CancellationToken cancellationToken)
+    public async Task<int?> GetRankPositionAsync(string steamId, int minimumKills, RankingMode rankingMode, int hideInactiveDays, CancellationToken cancellationToken)
     {
         var comparisonSql = GetRankComparisonSql(rankingMode);
+        var activeFilter = hideInactiveDays > 0 ? $"AND {GetActivePredicate("other.last_seen")}" : string.Empty;
         var sql = $"""
             SELECT CASE
                 WHEN me.kills >= @MinimumKills THEN 1 + (
                     SELECT COUNT(*)
                     FROM ur_cs2_player_stats other
                     WHERE other.kills >= @MinimumKills
+                      {activeFilter}
                       AND ({comparisonSql})
                 )
                 ELSE 0
@@ -172,13 +177,14 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         return await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
             sql,
-            new { SteamId = steamId, MinimumKills = minimumKills },
+            new { SteamId = steamId, MinimumKills = minimumKills, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
     }
 
-    public async Task<IReadOnlyList<TopEntry>> GetTopPlayersAsync(int minimumKills, int limit, RankingMode rankingMode, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<TopEntry>> GetTopPlayersAsync(int minimumKills, int limit, RankingMode rankingMode, int hideInactiveDays, CancellationToken cancellationToken)
     {
         var orderSql = GetRankOrderSql(rankingMode);
+        var activeFilter = hideInactiveDays > 0 ? $"AND {GetActivePredicate("last_seen")}" : string.Empty;
         var sql = $"""
             SELECT
                 COALESCE(NULLIF(name, ''), 'Unknown') AS Name,
@@ -186,10 +192,11 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
                 COALESCE(deaths, 0) AS Deaths,
                 COALESCE(assists, 0) AS Assists,
                 COALESCE(points, 0) AS Points,
-                ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) AS Kda,
+                ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0e0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) AS Kda,
                 COALESCE(playtime, 0) AS PlaytimeSeconds
             FROM ur_cs2_player_stats
             WHERE kills >= @MinimumKills
+              {activeFilter}
             ORDER BY {orderSql}
             LIMIT @Limit;
             """;
@@ -197,19 +204,21 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         var rows = await connection.QueryAsync<TopEntry>(new CommandDefinition(
             sql,
-            new { MinimumKills = minimumKills, Limit = limit },
+            new { MinimumKills = minimumKills, Limit = limit, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
 
         return rows.ToList();
     }
 
-    public async Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeAsync(int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<PlaytimeTopEntry>> GetTopPlaytimeAsync(int limit, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var activeFilter = hideInactiveDays > 0 ? $"WHERE {GetActivePredicate("last_seen")}" : string.Empty;
+        var sql = $"""
             SELECT
                 COALESCE(NULLIF(name, ''), 'Unknown') AS Name,
                 COALESCE(playtime, 0) AS PlaytimeSeconds
             FROM ur_cs2_player_stats
+            {activeFilter}
             ORDER BY playtime DESC, name ASC
             LIMIT @Limit;
             """;
@@ -217,7 +226,7 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         var rows = await connection.QueryAsync<PlaytimeTopEntry>(new CommandDefinition(
             sql,
-            new { Limit = limit },
+            new { Limit = limit, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
 
         return rows.ToList();
@@ -236,15 +245,17 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         return rows.ToList();
     }
 
-    public async Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponAsync(string weapon, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponAsync(string weapon, int limit, int hideInactiveDays, CancellationToken cancellationToken)
     {
-        const string sql = """
+        var activeFilter = hideInactiveDays > 0 ? $"AND {GetActivePredicate("p.last_seen")}" : string.Empty;
+        var sql = $"""
             SELECT
                 COALESCE(NULLIF(p.name, ''), 'Unknown') AS Name,
                 COALESCE(w.kills, 0) AS Kills
             FROM ur_cs2_weapon_stats w
             INNER JOIN ur_cs2_player_stats p ON w.steamid = p.steamid
             WHERE w.weapon = @Weapon
+              {activeFilter}
             ORDER BY w.kills DESC, p.name ASC
             LIMIT @Limit;
             """;
@@ -252,26 +263,28 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         var rows = await connection.QueryAsync<WeaponTopEntry>(new CommandDefinition(
             sql,
-            new { Weapon = weapon, Limit = limit },
+            new { Weapon = weapon, Limit = limit, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
 
         return rows.ToList();
     }
 
-    public async Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCategoryAsync(IReadOnlyCollection<string> weapons, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<WeaponTopEntry>> GetTopWeaponCategoryAsync(IReadOnlyCollection<string> weapons, int limit, int hideInactiveDays, CancellationToken cancellationToken)
     {
         if (weapons.Count == 0)
         {
             return Array.Empty<WeaponTopEntry>();
         }
 
-        const string sql = """
+        var activeFilter = hideInactiveDays > 0 ? $"AND {GetActivePredicate("p.last_seen")}" : string.Empty;
+        var sql = $"""
             SELECT
                 COALESCE(NULLIF(p.name, ''), 'Unknown') AS Name,
                 SUM(COALESCE(w.kills, 0)) AS Kills
             FROM ur_cs2_weapon_stats w
             INNER JOIN ur_cs2_player_stats p ON w.steamid = p.steamid
             WHERE w.weapon IN @Weapons
+              {activeFilter}
             GROUP BY w.steamid, p.name
             HAVING SUM(COALESCE(w.kills, 0)) > 0
             ORDER BY SUM(COALESCE(w.kills, 0)) DESC, p.name ASC
@@ -281,19 +294,21 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         var rows = await connection.QueryAsync<WeaponTopEntry>(new CommandDefinition(
             sql,
-            new { Weapons = weapons.ToArray(), Limit = limit },
+            new { Weapons = weapons.ToArray(), Limit = limit, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
 
         return rows.ToList();
     }
 
-    public async Task<IReadOnlyList<string>> GetTopSteamIdsAsync(int minimumKills, int limit, RankingMode rankingMode, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<string>> GetTopSteamIdsAsync(int minimumKills, int limit, RankingMode rankingMode, int hideInactiveDays, string alwaysVisibleSteamId, CancellationToken cancellationToken)
     {
         var orderSql = GetRankOrderSql(rankingMode);
+        var activeFilter = hideInactiveDays > 0 ? "AND (last_seen <= 0 OR last_seen >= @ActiveCutoff OR steamid = @SteamId)" : string.Empty;
         var sql = $"""
             SELECT steamid
             FROM ur_cs2_player_stats
             WHERE kills >= @MinimumKills
+              {activeFilter}
             ORDER BY {orderSql}
             LIMIT @Limit;
             """;
@@ -301,7 +316,35 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         var rows = await connection.QueryAsync<string>(new CommandDefinition(
             sql,
-            new { MinimumKills = minimumKills, Limit = limit },
+            new { MinimumKills = minimumKills, Limit = limit, SteamId = alwaysVisibleSteamId, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
+            cancellationToken: cancellationToken));
+
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<TeamkillTopEntry>> GetTopTeamkillsAsync(int minimumKills, int limit, int hideInactiveDays, CancellationToken cancellationToken)
+    {
+        var activeFilter = hideInactiveDays > 0 ? $"AND {GetActivePredicate("last_seen")}" : string.Empty;
+        var sql = $"""
+            SELECT
+                COALESCE(NULLIF(name, ''), 'Unknown') AS Name,
+                COALESCE(kills, 0) AS Kills,
+                COALESCE(teamkills, 0) AS Teamkills
+            FROM ur_cs2_player_stats
+            WHERE kills >= @MinimumKills
+              AND teamkills > 0
+              {activeFilter}
+            ORDER BY (COALESCE(teamkills, 0) * 1.0e0 / CASE WHEN COALESCE(kills, 0) = 0 THEN 1 ELSE kills END) DESC,
+                     teamkills DESC,
+                     kills DESC,
+                     name ASC
+            LIMIT @Limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        var rows = await connection.QueryAsync<TeamkillTopEntry>(new CommandDefinition(
+            sql,
+            new { MinimumKills = minimumKills, Limit = limit, ActiveCutoff = GetInactiveCutoff(hideInactiveDays) },
             cancellationToken: cancellationToken));
 
         return rows.ToList();
@@ -314,68 +357,111 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
             return 0;
         }
 
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-pruneDays).ToUnixTimeSeconds();
+        var cutoff = GetInactiveCutoff(pruneDays);
+        if (cutoff <= 0)
+        {
+            // The cutoff is clamped to the epoch for absurdly large day counts: nothing is old enough.
+            return 0;
+        }
+
         var filterSql = "last_seen > 0 AND last_seen < @Cutoff";
 
         object parameters;
         if (excludedSteamIds.Count > 0)
         {
             filterSql += " AND steamid NOT IN @ExcludedSteamIds";
-            parameters = new { Cutoff = (int)cutoff, ExcludedSteamIds = excludedSteamIds.ToArray() };
+            parameters = new { Cutoff = cutoff, ExcludedSteamIds = excludedSteamIds.ToArray() };
         }
         else
         {
-            parameters = new { Cutoff = (int)cutoff };
+            parameters = new { Cutoff = cutoff };
         }
 
-        var deleteWeaponSql = $"""
-            DELETE FROM ur_cs2_weapon_stats
-            WHERE steamid IN (
-                SELECT steamid
-                FROM ur_cs2_player_stats
-                WHERE {filterSql}
-            );
-            """;
+        var batchSize = PruneBatchSize;
+        var selectBatchSql = $"SELECT steamid FROM ur_cs2_player_stats WHERE {filterSql} LIMIT {batchSize};";
 
-        var deletePlayerSql = $"""
-            DELETE FROM ur_cs2_player_stats
-            WHERE {filterSql};
+        // The player DELETE repeats the filter: a player who came back between the SELECT
+        // and the DELETE is no longer stale and must keep their row. Weapon rows only go
+        // for the batch players whose player row is really gone.
+        var deletePlayersSql = $"DELETE FROM ur_cs2_player_stats WHERE steamid IN @Batch AND {filterSql};";
+        const string deleteWeaponsSql = """
+            DELETE FROM ur_cs2_weapon_stats
+            WHERE steamid IN @Batch
+              AND steamid NOT IN (SELECT steamid FROM ur_cs2_player_stats WHERE steamid IN @Batch);
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        try
+        // Batches, one short transaction each: a huge backlog in a single statement
+        // outlives the 30 s command timeout and would never complete.
+        var totalDeleted = 0;
+        while (true)
         {
-            await connection.ExecuteAsync(new CommandDefinition(
-                deleteWeaponSql,
-                parameters,
-                transaction,
-                cancellationToken: cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var deletedPlayers = await connection.ExecuteAsync(new CommandDefinition(
-                deletePlayerSql,
+            var batch = (await connection.QueryAsync<string>(new CommandDefinition(
+                selectBatchSql,
                 parameters,
-                transaction,
-                cancellationToken: cancellationToken));
+                cancellationToken: cancellationToken))).ToArray();
 
-            await transaction.CommitAsync(cancellationToken);
-            return deletedPlayers;
+            if (batch.Length == 0)
+            {
+                break;
+            }
+
+            if (PruneAfterSelectHook is { } hook)
+            {
+                await hook(batch);
+            }
+
+            var deleteParameters = new DynamicParameters(parameters);
+            deleteParameters.Add("Batch", batch);
+
+            int deletedPlayers;
+            await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
+            {
+                try
+                {
+                    deletedPlayers = await connection.ExecuteAsync(new CommandDefinition(
+                        deletePlayersSql,
+                        deleteParameters,
+                        transaction,
+                        cancellationToken: cancellationToken));
+
+                    await connection.ExecuteAsync(new CommandDefinition(
+                        deleteWeaponsSql,
+                        new { Batch = batch },
+                        transaction,
+                        cancellationToken: cancellationToken));
+
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                catch
+                {
+                    await SchemaInitializer.RollbackQuietlyAsync(transaction, _logger);
+                    throw;
+                }
+            }
+
+            totalDeleted += deletedPlayers;
+
+            // A short batch is the last one; a batch that deleted nothing would loop forever.
+            if (batch.Length < batchSize || deletedPlayers == 0)
+            {
+                break;
+            }
         }
-        catch
-        {
-            // Never the caller's token: on shutdown it is already cancelled and the
-            // rollback would throw over the exception that actually caused it.
-            await transaction.RollbackAsync(CancellationToken.None);
-            throw;
-        }
+
+        return totalDeleted;
     }
 
     public async ValueTask DisposeAsync()
     {
         // Both backends pool connections. Without this the pooled handles outlive
-        // the plugin: SQLite keeps the database file open and blocks the assembly
-        // load context from unloading, and MySQL sockets pile up on every reload.
+        // the plugin: SQLite keeps the database file open and MySQL sockets pile up
+        // on every reload. Clearing the pools closes them and releases the SQLite file;
+        // the assembly load context itself may stay alive anyway, because
+        // Microsoft.Data.Sqlite registers static handlers.
         try
         {
             await ClearConnectionPoolsAsync();
@@ -396,6 +482,26 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         return ValueTask.CompletedTask;
     }
 
+    // Same cutoff the prune uses, so a hidden player is exactly one that would be pruned.
+    // Computed in 64 bits and clamped to the int range of the last_seen column: a huge
+    // day count would otherwise wrap into the future (deleting everyone) or throw.
+    // 0 means nothing is old enough, so prune deletes nothing and Hide hides nothing.
+    private static int GetInactiveCutoff(int days)
+    {
+        if (days <= 0)
+        {
+            return 0;
+        }
+
+        var cutoff = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - days * 86400L;
+        return (int)Math.Clamp(cutoff, 0L, int.MaxValue);
+    }
+
+    private static string GetActivePredicate(string column)
+    {
+        return $"({column} <= 0 OR {column} >= @ActiveCutoff)";
+    }
+
     private async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
         var connection = CreateConnection();
@@ -413,7 +519,8 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         }
         catch (Exception exception)
         {
-            _logger.LogError(exception, "Failed to open {Backend} rank repository connection.", Dialect.IsSqlite ? "SQLite" : "MySQL");
+            // Debug only: every caller already logs the failure, and RankService logs it once.
+            _logger.LogDebug(exception, "Failed to open {Backend} rank repository connection.", Dialect.IsSqlite ? "SQLite" : "MySQL");
             await connection.DisposeAsync();
             throw;
         }
@@ -424,14 +531,14 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
         return rankingMode == RankingMode.Points
             ? """
               points DESC,
-              ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) DESC,
+              ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0e0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) DESC,
               kills DESC,
               assists DESC,
               playtime DESC,
               name ASC
               """
             : """
-              ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) DESC,
+              ((COALESCE(kills, 0) + COALESCE(assists, 0)) * 1.0e0 / CASE WHEN COALESCE(deaths, 0) = 0 THEN 1 ELSE deaths END) DESC,
               kills DESC,
               assists DESC,
               points DESC,
@@ -442,8 +549,8 @@ internal abstract class DapperRankRepositoryBase : IRankRepository
 
     private static string GetRankComparisonSql(RankingMode rankingMode)
     {
-        var otherKda = "((COALESCE(other.kills, 0) + COALESCE(other.assists, 0)) * 1.0 / CASE WHEN COALESCE(other.deaths, 0) = 0 THEN 1 ELSE other.deaths END)";
-        var meKda = "((COALESCE(me.kills, 0) + COALESCE(me.assists, 0)) * 1.0 / CASE WHEN COALESCE(me.deaths, 0) = 0 THEN 1 ELSE me.deaths END)";
+        var otherKda = "((COALESCE(other.kills, 0) + COALESCE(other.assists, 0)) * 1.0e0 / CASE WHEN COALESCE(other.deaths, 0) = 0 THEN 1 ELSE other.deaths END)";
+        var meKda = "((COALESCE(me.kills, 0) + COALESCE(me.assists, 0)) * 1.0e0 / CASE WHEN COALESCE(me.deaths, 0) = 0 THEN 1 ELSE me.deaths END)";
         var kdaThenStatsTieBreakers = $"""
             {otherKda} > {meKda}
             OR (

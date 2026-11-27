@@ -34,7 +34,13 @@ public sealed class PlayerSessionService
                 identity.SteamId,
                 _ => new PlayerSession(identity.SteamId, identity.SteamId64, identity.Name));
 
-            var newlyConnected = session.Attach(identity, nowUtc);
+            if (!session.TryAttach(identity, nowUtc, out var newlyConnected))
+            {
+                // Evicted between GetOrAdd and the attach: drop the stale entry (if it is
+                // still stored) and build a fresh session on the next pass.
+                _sessionsBySteamId.TryRemove(new KeyValuePair<string, PlayerSession>(identity.SteamId, session));
+                continue;
+            }
 
             // A save of the previous connection, finishing on another thread, may have
             // evicted this session between GetOrAdd and Attach. Once attached it can no
@@ -118,7 +124,13 @@ public sealed class PlayerSessionService
         }
 
         session = matchedSession;
-        if (session.Attach(identity, DateTimeOffset.UtcNow))
+        if (!session.TryAttach(identity, DateTimeOffset.UtcNow, out var newlyConnected))
+        {
+            session = null!;
+            return false;
+        }
+
+        if (newlyConnected)
         {
             Interlocked.Increment(ref _connectedPlayerCount);
         }
@@ -271,7 +283,8 @@ public sealed class PlayerSessionService
 
     public void RemoveIfCompleted(PlayerSession session)
     {
-        if (!session.CanBeRemoved())
+        // Check and eviction flag are one atomic step; see PlayerSession.TryMarkEvicted.
+        if (!session.TryMarkEvicted())
         {
             return;
         }

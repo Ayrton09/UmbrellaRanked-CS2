@@ -26,6 +26,7 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
             matches_won INT NOT NULL DEFAULT 0,
             matches_lost INT NOT NULL DEFAULT 0,
             matches_tied INT NOT NULL DEFAULT 0,
+            teamkills INT NOT NULL DEFAULT 0,
             playtime INT NOT NULL DEFAULT 0,
             last_seen INT NOT NULL DEFAULT 0,
             last_reset INT NOT NULL DEFAULT 0
@@ -41,8 +42,8 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @Headshots, @Mvps, @RoundsWon, @RoundsLost, @RoundsCt, @RoundsT, @MatchesWon, @MatchesLost, @MatchesTied, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, teamkills, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, @Kills, @Deaths, @Assists, @Points, @Headshots, @Mvps, @RoundsWon, @RoundsLost, @RoundsCt, @RoundsT, @MatchesWon, @MatchesLost, @MatchesTied, @Teamkills, @PlaytimeSeconds, @LastSeenUnixTime, @LastResetUnixTime)
         ON DUPLICATE KEY UPDATE
             name = VALUES(name),
             kills = VALUES(kills),
@@ -58,6 +59,7 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
             matches_won = VALUES(matches_won),
             matches_lost = VALUES(matches_lost),
             matches_tied = VALUES(matches_tied),
+            teamkills = VALUES(teamkills),
             playtime = VALUES(playtime),
             last_seen = VALUES(last_seen),
             last_reset = VALUES(last_reset);
@@ -70,8 +72,8 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
             headshots = VALUES(headshots);
         """,
         """
-        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, playtime, last_seen, last_reset)
-        VALUES (@SteamId, @Name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
+        INSERT INTO ur_cs2_player_stats (steamid, name, kills, deaths, assists, points, headshots, mvps, rounds_won, rounds_lost, rounds_ct, rounds_t, matches_won, matches_lost, matches_tied, teamkills, playtime, last_seen, last_reset)
+        VALUES (@SteamId, @Name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, @PlaytimeSeconds, @ResetUnixTime, @ResetUnixTime)
         ON DUPLICATE KEY UPDATE
             name = VALUES(name),
             kills = 0,
@@ -87,6 +89,7 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
             matches_won = 0,
             matches_lost = 0,
             matches_tied = 0,
+            teamkills = 0,
             playtime = VALUES(playtime),
             last_seen = VALUES(last_seen),
             last_reset = VALUES(last_reset);
@@ -109,10 +112,22 @@ internal sealed class MySqlRankRepository : DapperRankRepositoryBase
             MaximumPoolSize = settings.MaximumPoolSize,
             AllowUserVariables = true,
             AllowPublicKeyRetrieval = true,
-            SslMode = MySqlSslMode.Preferred
+            SslMode = ToMySqlSslMode(settings.SslMode)
         };
 
         _connectionString = builder.ConnectionString;
+    }
+
+    internal static MySqlSslMode ToMySqlSslMode(DatabaseSslMode mode)
+    {
+        return mode switch
+        {
+            DatabaseSslMode.None => MySqlSslMode.None,
+            DatabaseSslMode.Required => MySqlSslMode.Required,
+            DatabaseSslMode.VerifyCA => MySqlSslMode.VerifyCA,
+            DatabaseSslMode.VerifyFull => MySqlSslMode.VerifyFull,
+            _ => MySqlSslMode.Preferred
+        };
     }
 
     protected override SqlDialect Dialect => MySqlDialect;

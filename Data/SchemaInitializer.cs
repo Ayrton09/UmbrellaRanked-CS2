@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using MySqlConnector;
 
 namespace UmbrellaRanked.Data;
 
@@ -25,6 +26,86 @@ internal static class SchemaInitializer
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        // Several servers can share one MySQL database and start together: the
+        // check-then-alter steps below would race (errors 1060, 1061, 1213 deadlocks).
+        var lockTaken = !dialect.IsSqlite && await TryTakeSchemaLockAsync(connection, logger, cancellationToken);
+
+        try
+        {
+            await InitializeSchemaAsync(connection, dialect, logger, cancellationToken);
+        }
+        finally
+        {
+            if (lockTaken)
+            {
+                await ReleaseSchemaLockAsync(connection, logger);
+            }
+        }
+    }
+
+    internal static async Task RollbackQuietlyAsync(DbTransaction transaction, ILogger logger)
+    {
+        try
+        {
+            // Never the caller's token: on shutdown it is already cancelled.
+            await transaction.RollbackAsync(CancellationToken.None);
+        }
+        catch (Exception rollbackException)
+        {
+            // Never let the rollback replace the exception that actually caused it.
+            logger.LogDebug(rollbackException, "Rollback failed after an earlier error.");
+        }
+    }
+
+    private static async Task<bool> TryTakeSchemaLockAsync(DbConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Wait up to 30 s for the lock; the command timeout has to outlast that.
+            var result = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+                "SELECT GET_LOCK('umbrellaranked_schema', 30);",
+                commandTimeout: 45,
+                cancellationToken: cancellationToken));
+
+            if (result == 1)
+            {
+                return true;
+            }
+
+            logger.LogWarning("Could not take the schema lock within 30 s. Another server may still be updating the tables; continuing without it.");
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Could not take the schema lock. Continuing without it.");
+            return false;
+        }
+    }
+
+    private static async Task ReleaseSchemaLockAsync(DbConnection connection, ILogger logger)
+    {
+        try
+        {
+            await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+                "SELECT RELEASE_LOCK('umbrellaranked_schema');",
+                cancellationToken: CancellationToken.None));
+        }
+        catch (Exception exception)
+        {
+            logger.LogDebug(exception, "Could not release the schema lock (it is released when the connection closes).");
+        }
+    }
+
+    private static async Task InitializeSchemaAsync(
+        DbConnection connection,
+        SqlDialect dialect,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
         await connection.ExecuteAsync(new CommandDefinition(
             dialect.CreatePlayerStatsTableSql,
             cancellationToken: cancellationToken));
@@ -42,6 +123,8 @@ internal static class SchemaInitializer
         {
             await EnsureColumnAsync(connection, dialect, "ur_cs2_player_stats", columnName, "INT NOT NULL DEFAULT 0", cancellationToken);
         }
+
+        await EnsureColumnAsync(connection, dialect, "ur_cs2_player_stats", "teamkills", "INT NOT NULL DEFAULT 0", cancellationToken);
 
         await EnsureColumnAsync(connection, dialect, "ur_cs2_weapon_stats", "headshots", "INT NOT NULL DEFAULT 0", cancellationToken);
 
@@ -108,7 +191,7 @@ internal static class SchemaInitializer
         }
         catch
         {
-            await transaction.RollbackAsync(CancellationToken.None);
+            await RollbackQuietlyAsync(transaction, logger);
             throw;
         }
 
@@ -149,7 +232,33 @@ internal static class SchemaInitializer
         }
 
         var sql = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {definition}";
-        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
+        }
+        catch (DbException exception) when (IsDuplicateObjectError(exception))
+        {
+            // Another server added it between the check and the ALTER.
+            var existsNow = dialect.IsSqlite
+                ? await SqliteColumnExistsAsync(connection, tableName, columnName, cancellationToken)
+                : await MySqlColumnExistsAsync(connection, tableName, columnName, cancellationToken);
+            if (!existsNow)
+            {
+                throw;
+            }
+        }
+    }
+
+    // MySQL 1060 duplicate column, 1061 duplicate key name; SQLite reports them by message.
+    private static bool IsDuplicateObjectError(DbException exception)
+    {
+        if (exception is MySqlException mySqlException)
+        {
+            return mySqlException.Number is 1060 or 1061;
+        }
+
+        return exception.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task EnsureIndexAsync(
@@ -178,6 +287,19 @@ internal static class SchemaInitializer
         {
             throw;
         }
+        catch (DbException exception) when (IsDuplicateObjectError(exception))
+        {
+            // Another server created it between the check and the CREATE INDEX.
+            if (!await IndexExistsAsync(connection, dialect, tableName, indexName, cancellationToken))
+            {
+                logger.LogError(
+                    exception,
+                    "Could not create required Umbrella Ranked index {IndexName} on {TableName}.",
+                    indexName,
+                    tableName);
+                throw;
+            }
+        }
         catch (Exception exception)
         {
             logger.LogError(
@@ -187,6 +309,18 @@ internal static class SchemaInitializer
                 tableName);
             throw;
         }
+    }
+
+    private static Task<bool> IndexExistsAsync(
+        DbConnection connection,
+        SqlDialect dialect,
+        string tableName,
+        string indexName,
+        CancellationToken cancellationToken)
+    {
+        return dialect.IsSqlite
+            ? SqliteIndexExistsAsync(connection, tableName, indexName, cancellationToken)
+            : MySqlIndexExistsAsync(connection, tableName, indexName, cancellationToken);
     }
 
     private static async Task<bool> MySqlColumnExistsAsync(

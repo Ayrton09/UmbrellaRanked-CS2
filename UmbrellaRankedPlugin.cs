@@ -27,6 +27,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private const int ConfigVersion = 1;
     private const int MinimumAllowedKillsRequired = 100;
     private const int MinimumAllowedPruneInactiveDays = 35;
+    private const int MaximumAllowedPruneInactiveDays = 3650;
+    private const int LeaderboardNameCharacters = 20;
     private const double MinimumAllowedAutosaveIntervalSeconds = 10.0;
     private const double MinimumAllowedPruneCheckIntervalHours = 0.1;
     private const double MaximumAllowedTopCacheSeconds = 3600.0;
@@ -39,6 +41,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private const double UnloadFlushTimeoutSeconds = 30.0;
     private const string TopPlayersMenuContext = "ranked.top.players";
     private const string TopTimeMenuContext = "ranked.top.time";
+    private const string TopTeamkillsMenuContext = "ranked.top.teamkills";
     private const string TopWeaponsMenuContext = "ranked.top.weapons";
     private const string ResetRankMenuContext = "ranked.reset";
     private static readonly IReadOnlyList<WeaponCategoryDefinition> WeaponCategoryDefinitions =
@@ -71,6 +74,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private bool _isUnloading;
     private bool _entitySystemReady;
     private bool _matchResultRecorded;
+    private bool _shutdownFlushed;
+    private bool _startupPrunePending;
+    private readonly RoundParticipation _roundParticipation = new();
+    private Dictionary<string, string>? _englishFallback;
 
     // Objective rewards that can be farmed are paid once per round. Game thread only.
     private readonly HashSet<int> _rewardedHostagesThisRound = new();
@@ -84,7 +91,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private long _lastLoadRetryScanTick;
 
     public override string ModuleName => "Umbrella Ranked System";
-    public override string ModuleVersion => "1.3.0";
+    public override string ModuleVersion => "1.4.0";
     public override string ModuleAuthor => "Ayrton09";
     public override string ModuleDescription => string.Empty;
 
@@ -160,6 +167,38 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 MinimumAllowedPruneInactiveDays,
                 MinimumAllowedPruneInactiveDays);
             config.PruneInactiveDays = MinimumAllowedPruneInactiveDays;
+        }
+        else if (config.PruneInactiveDays > MaximumAllowedPruneInactiveDays)
+        {
+            Logger.LogWarning(
+                "PruneInactiveDays cannot be higher than {Maximum}. Clamping to {Maximum}.",
+                MaximumAllowedPruneInactiveDays,
+                MaximumAllowedPruneInactiveDays);
+            config.PruneInactiveDays = MaximumAllowedPruneInactiveDays;
+        }
+
+        if (!Enum.IsDefined(config.RankingMode))
+        {
+            Logger.LogWarning("RankingMode must be Points or Kda. Falling back to Points.");
+            config.RankingMode = RankingMode.Points;
+        }
+
+        if (!Enum.IsDefined(config.Top1Sound.PlaybackMode))
+        {
+            Logger.LogWarning("Top1Sound.PlaybackMode must be Disabled, ClientCommand or SoundEvent. Falling back to ClientCommand.");
+            config.Top1Sound.PlaybackMode = SoundPlaybackMode.ClientCommand;
+        }
+
+        if (!Enum.IsDefined(config.MySql.SslMode))
+        {
+            Logger.LogWarning("MySql.SslMode must be None, Preferred, Required, VerifyCA or VerifyFull. Falling back to Preferred.");
+            config.MySql.SslMode = DatabaseSslMode.Preferred;
+        }
+
+        if (!Enum.IsDefined(config.PruneMode))
+        {
+            Logger.LogWarning("PruneMode must be Delete or Hide. Falling back to Delete.");
+            config.PruneMode = PruneMode.Delete;
         }
 
         if (config.PruneCheckIntervalHours < 0)
@@ -281,6 +320,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _shutdown = new CancellationTokenSource();
         _shutdownToken = _shutdown.Token;
         _isUnloading = false;
+        _shutdownFlushed = false;
+        LoadEnglishFallback();
 
         // On a fresh boot Load runs before the first map: touching entities then would
         // poison CSSharp's cached entity list for every plugin until a restart. After a
@@ -297,11 +338,11 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _sessionService = new PlayerSessionService(Logger, IsSvLanServer);
         _weaponStatsService = new WeaponStatsService();
         _commandCooldownService = new CommandCooldownService();
-        _playtimeService = new PlaytimeService(Localizer);
+        _playtimeService = new PlaytimeService(T);
         _repository = CreateRepository();
         _rankService = new RankService(_repository, _sessionService, _weaponStatsService, Logger);
         _autosaveService = new AutosaveService(this, _sessionService, _rankService, Logger);
-        _wasdMenuService = new WasdMenuService();
+        _wasdMenuService = new WasdMenuService { CloseLabel = player => T(player, "menu.close") };
 
         try
         {
@@ -330,10 +371,57 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             string.IsNullOrEmpty(_currentMapName) ? "not started yet" : _currentMapName,
             hotReload);
 
-        if (Config.PruneOnStartup && Config.PruneInactiveDays > 0)
+        if (Config.PruneMode == PruneMode.Hide && Config.PruneInactiveDays > 0)
         {
-            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "initial prune");
+            Logger.LogInformation(
+                "PruneMode is Hide: players unseen for {Days} days are hidden from the rankings and nothing is deleted.",
+                Config.PruneInactiveDays);
         }
+        else if (Config.PruneOnStartup && Config.PruneInactiveDays > 0)
+        {
+            // Deferred to the first tick with the players attached, so the players who
+            // are already connected (hot reload) are excluded from the prune.
+            _startupPrunePending = true;
+        }
+    }
+
+    [GameEventHandler]
+    public HookResult OnServerPreShutdown(EventServerPreShutdown @event, GameEventInfo info)
+    {
+        FlushOnServerShutdown("server_pre_shutdown event");
+        return HookResult.Continue;
+    }
+
+    // `quit` and a restart never call Unload, and not every path fires the game event, but
+    // the engine always deactivates the game server Steam API on the way out.
+    private void OnGameServerSteamAPIDeactivated()
+    {
+        FlushOnServerShutdown("Steam API deactivation");
+    }
+
+    /// <summary>
+    /// CounterStrikeSharp never calls Unload when the server quits or restarts, so this is
+    /// the only chance to save what is still in memory. Both triggers can fire for the same
+    /// shutdown, so only the first one flushes, and Unload skips its own flush afterwards.
+    /// </summary>
+    private void FlushOnServerShutdown(string trigger)
+    {
+        if (_isUnloading || _autosaveService == null)
+        {
+            return;
+        }
+
+        // One flush per shutdown. The flag is set before the flush starts: with the
+        // database down the flush can block for its whole timeout, and every later
+        // trigger (and Unload) must not wait that long again.
+        if (_shutdownFlushed)
+        {
+            return;
+        }
+
+        _shutdownFlushed = true;
+        Logger.LogInformation("Flushing Umbrella Ranked stats on server shutdown ({Trigger}).", trigger);
+        FlushWithTimeout(UnloadFlushTimeoutSeconds, "Server shutdown flush", "Stats that were not saved yet are lost.");
     }
 
     public override void Unload(bool hotReload)
@@ -356,7 +444,11 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _wasdMenuService?.CloseAll();
         _autosaveService?.Stop();
 
-        FlushWithTimeout(UnloadFlushTimeoutSeconds, "Final Umbrella Ranked flush", "Stats that were not saved yet are lost.");
+        // Skipped when the server shutdown flush already ran; a plain unload or reload flushes here.
+        if (!_shutdownFlushed)
+        {
+            FlushWithTimeout(UnloadFlushTimeoutSeconds, "Final Umbrella Ranked flush", "Stats that were not saved yet are lost.");
+        }
 
         try
         {
@@ -407,6 +499,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var victim = @event.Userid;
         var assister = @event.Assister;
         var isSuicide = IsRealPlayer(attacker) && IsSamePlayer(attacker, victim);
+        var victimIsBot = victim is { IsValid: true, IsBot: true };
         // The victim only has to be a valid controller: killing a teammate bot is still
         // a teamkill, it just records no death because bots have no rank.
         var isTeamKill = IsRealPlayer(attacker) &&
@@ -416,11 +509,15 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         if (isTeamKill)
         {
-            rankService.TryRecordPoints(attacker!, -Config.Points.TeamKillPenalty);
+            rankService.TryRecordTeamKill(attacker!, Config.Points.TeamKillPenalty);
         }
         else if (IsRealPlayer(attacker) && !isSuicide)
         {
-            rankService.TryRecordKill(attacker!, @event.Weapon, @event.Headshot, GetKillPointValue(@event));
+            rankService.TryRecordKill(
+                attacker!,
+                @event.Weapon,
+                @event.Headshot,
+                ScoringRules.ApplyBotRule(GetKillPointValue(@event), victimIsBot, Config.BotKillPoints));
         }
 
         if (!isSuicide &&
@@ -429,7 +526,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             !IsSamePlayer(assister, attacker) &&
             !IsSamePlayer(assister, victim))
         {
-            rankService.TryRecordAssist(assister!, Config.Points.Assist);
+            rankService.TryRecordAssist(assister!, ScoringRules.ApplyBotRule(Config.Points.Assist, victimIsBot, Config.BotKillPoints));
         }
 
         if (IsRealPlayer(victim))
@@ -588,6 +685,13 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     }
 
     [GameEventHandler]
+    public HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
+    {
+        SnapshotRoundParticipants();
+        return HookResult.Continue;
+    }
+
+    [GameEventHandler]
     public HookResult OnRoundEnd(EventRoundEnd @event, GameEventInfo info)
     {
         if (TryGetCompetitiveRankService(out var rankService))
@@ -613,6 +717,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     public HookResult OnBeginNewMatch(EventBeginNewMatch @event, GameEventInfo info)
     {
         _matchResultRecorded = false;
+        _roundParticipation.ClearMatch();
         return HookResult.Continue;
     }
 
@@ -718,6 +823,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _currentMapName = mapName ?? string.Empty;
         _entitySystemReady = true;
         _matchResultRecorded = false;
+        _roundParticipation.ClearMatch();
         ResetObjectiveRoundState();
     }
 
@@ -725,6 +831,38 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     {
         _rewardedHostagesThisRound.Clear();
         _c4PickUpRewardedSlotsThisRound.Clear();
+        _roundParticipation.ClearRound();
+    }
+
+    /// <summary>
+    /// Taken when the freeze time ends: the players on a team at that moment are the
+    /// ones who play the round (see <see cref="RoundParticipation"/>).
+    /// </summary>
+    private void SnapshotRoundParticipants()
+    {
+        if (_sessionService == null || IsWarmupPeriod() || !TryGetRealPlayers(out var players))
+        {
+            return;
+        }
+
+        var participants = new List<KeyValuePair<string, int>>();
+        foreach (var player in players)
+        {
+            var team = (int)player.TeamNum;
+            if (team > 1 && _sessionService.TryResolveIdentity(player, out var identity))
+            {
+                participants.Add(new KeyValuePair<string, int>(identity.SteamId, team));
+            }
+        }
+
+        _roundParticipation.BeginRound(participants);
+    }
+
+    private string? TryGetStorageSteamId(CCSPlayerController player)
+    {
+        return _sessionService != null && _sessionService.TryResolveIdentity(player, out var identity)
+            ? identity.SteamId
+            : null;
     }
 
     private void OnServerPrecacheResources(ResourceManifest manifest)
@@ -804,6 +942,22 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         RunBackground(() => ExecuteTopCommandAsync(session), "top command");
     }
 
+    private void OnTopTkCommand(CCSPlayerController? player, CommandInfo commandInfo)
+    {
+        if (!TryPrepareLoadedPlayerCommand(player, out var session))
+        {
+            return;
+        }
+
+        if (!IsCompetitiveRankingEnabledForCurrentMap())
+        {
+            PrintLocalized(player!, "rank.disabled");
+            return;
+        }
+
+        RunBackground(() => ExecuteTopTkCommandAsync(session), "toptk command");
+    }
+
     private void OnTopTimeCommand(CCSPlayerController? player, CommandInfo commandInfo)
     {
         if (!TryPrepareLoadedPlayerCommand(player, out var session))
@@ -866,36 +1020,54 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         QueueForSession(session, connectedPlayer => OpenResetConfirmMenu(connectedPlayer, session.SteamId));
     }
 
+    // Console and RCON callers get raw bytes, so the chat color codes (below 0x20) are dropped for them.
+    private static void Reply(CCSPlayerController? player, CommandInfo commandInfo, string text)
+    {
+        if (player == null)
+        {
+            text = new string(text.Where(character => character >= ' ').ToArray());
+        }
+
+        commandInfo.ReplyToCommand(text);
+    }
+
     private void OnPruneNowCommand(CCSPlayerController? player, CommandInfo commandInfo)
     {
         if (player != null && !AdminManager.PlayerHasPermissions(player, "@css/root"))
         {
-            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "admin.permission"));
+            Reply(player, commandInfo, T(player, "admin.permission"));
             return;
         }
 
         if (_repository == null)
         {
-            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.data_loading"));
+            Reply(player, commandInfo, T(player, "prune.data_loading"));
             return;
         }
 
         if (Config.PruneInactiveDays <= 0)
         {
-            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.disabled"));
+            Reply(player, commandInfo, T(player, "prune.disabled"));
             return;
         }
 
-        commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "prune.started"));
+        if (Config.PruneMode != PruneMode.Delete)
+        {
+            Reply(player, commandInfo, T(player, "prune.hide_mode"));
+            return;
+        }
+
+        Reply(player, commandInfo, T(player, "prune.started"));
         var steamId = TryGetCallerSteamId(player);
-        RunBackground(() => PruneNowAsync(showStartedMessage: true, steamIdForReply: steamId), "manual prune");
+        var excluded = GetPruneExclusions();
+        RunBackground(() => PruneNowAsync(showStartedMessage: true, steamIdForReply: steamId, excluded), "manual prune");
     }
 
     private void OnRankStatusCommand(CCSPlayerController? player, CommandInfo commandInfo)
     {
         if (player != null && !AdminManager.PlayerHasPermissions(player, "@css/root"))
         {
-            commandInfo.ReplyToCommand(Localizer.ForPlayer(player, "admin.permission"));
+            Reply(player, commandInfo, T(player, "admin.permission"));
             return;
         }
 
@@ -905,13 +1077,14 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var activeMenus = _wasdMenuService?.ActiveMenuCount ?? 0;
         var competitiveEnabled = IsCompetitiveRankingEnabledForCurrentMap();
 
-        commandInfo.ReplyToCommand("[Umbrella Ranked] Status");
-        commandInfo.ReplyToCommand($"Backend: {Config.DatabaseMode} | Config: {(Config.Enabled ? "on" : "off")} | CVar: {(IsRuntimeRankCvarEnabled() ? "on" : "off")} | Competitive: {(competitiveEnabled ? "on" : "off")} | Mode: {Config.RankingMode}");
-        commandInfo.ReplyToCommand($"Map: {GetCurrentMapDisplayName()} | Map blocked: {(IsCurrentMapRankDisabled() ? "yes" : "no")}");
-        commandInfo.ReplyToCommand($"Players: connected {sessions.ConnectedPlayers}, loaded {sessions.LoadedSessions}, loading {sessions.LoadingSessions}, sessions {sessions.TotalSessions}");
-        commandInfo.ReplyToCommand($"Pending saves: {sessions.PendingSaveSessions} | Autosave: {(autosave.IsRunning ? "on" : "off")} | Menus: {activeMenus}");
-        commandInfo.ReplyToCommand($"Top cache: {rankStatus.CachedLeaderboardCount} entries | TTL: {Config.TopCacheSeconds:n0}s | Last refresh: {FormatStatusTime(rankStatus.LastCacheRefreshUtc)}");
-        commandInfo.ReplyToCommand($"Last autosave OK: {FormatStatusTime(autosave.LastSuccessUtc)} | Last error: {(string.IsNullOrWhiteSpace(autosave.LastError) ? "none" : autosave.LastError)}");
+        Reply(player, commandInfo, "[Umbrella Ranked] Status");
+        Reply(player, commandInfo, $"Backend: {Config.DatabaseMode} | Config: {(Config.Enabled ? "on" : "off")} | CVar: {(IsRuntimeRankCvarEnabled() ? "on" : "off")} | Competitive: {(competitiveEnabled ? "on" : "off")} | Mode: {Config.RankingMode}");
+        Reply(player, commandInfo, $"Map: {GetCurrentMapDisplayName()} | Map blocked: {(IsCurrentMapRankDisabled() ? "yes" : "no")}");
+        Reply(player, commandInfo, $"Prune: {(Config.PruneInactiveDays > 0 ? Config.PruneMode.ToString() : "off")} | Inactive days: {Config.PruneInactiveDays}");
+        Reply(player, commandInfo, $"Players: connected {sessions.ConnectedPlayers}, loaded {sessions.LoadedSessions}, loading {sessions.LoadingSessions}, sessions {sessions.TotalSessions}");
+        Reply(player, commandInfo, $"Pending saves: {sessions.PendingSaveSessions} | Autosave: {(autosave.IsRunning ? "on" : "off")} | Menus: {activeMenus}");
+        Reply(player, commandInfo, $"Top cache: {rankStatus.CachedLeaderboardCount} entries | TTL: {Config.TopCacheSeconds:n0}s | Last refresh: {FormatStatusTime(rankStatus.LastCacheRefreshUtc)}");
+        Reply(player, commandInfo, $"Last autosave OK: {FormatStatusTime(autosave.LastSuccessUtc)} | Last error: {(string.IsNullOrWhiteSpace(autosave.LastError) ? "none" : autosave.LastError)}");
     }
 
     private HookResult OnSayCommand(CCSPlayerController? player, CommandInfo commandInfo)
@@ -942,6 +1115,9 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             case "toptime":
                 OnTopTimeCommand(player, commandInfo);
                 return HookResult.Handled;
+            case "toptk":
+                OnTopTkCommand(player, commandInfo);
+                return HookResult.Handled;
             case "resetrank":
             case "rrank":
                 OnResetRankCommand(player, commandInfo);
@@ -968,7 +1144,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 return;
             }
 
-            var position = await _rankService.GetRankPositionAsync(session.SteamId, Config.MinimumKillsRequired, Config.RankingMode, _shutdownToken);
+            var position = await _rankService.GetRankPositionAsync(session.SteamId, Config.MinimumKillsRequired, Config.RankingMode, GetHiddenInactiveDays(), _shutdownToken);
             var stats = _rankService.CaptureCurrentStats(session);
             var positionValue = position.GetValueOrDefault();
 
@@ -978,14 +1154,14 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
                 if (positionValue > 0)
                 {
-                    player.PrintToChat(Localizer.ForPlayer(player, "rank.message", positionValue, stats.Points, stats.Kills, stats.Deaths, stats.Assists, stats.Kda, playtime));
+                    player.PrintToChat(T(player, "rank.message", positionValue, stats.Points, stats.Kills, stats.Deaths, stats.Assists, stats.Kda, playtime));
                 }
                 else
                 {
-                    player.PrintToChat(Localizer.ForPlayer(player, "rank.unranked", stats.Points, stats.Kills, stats.Deaths, stats.Assists, stats.Kda, playtime));
+                    player.PrintToChat(T(player, "rank.unranked", stats.Points, stats.Kills, stats.Deaths, stats.Assists, stats.Kda, playtime));
                 }
 
-                player.PrintToChat(Localizer.ForPlayer(player, "rank.details", stats.HeadshotPercentage, stats.Mvps));
+                player.PrintToChat(T(player, "rank.details", stats.HeadshotPercentage, stats.Mvps, stats.Teamkills, stats.TeamkillPercentage));
             });
         }
         catch (Exception exception)
@@ -1014,6 +1190,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 Config.MinimumKillsRequired,
                 Config.LeaderboardLimit,
                 Config.RankingMode,
+                GetHiddenInactiveDays(),
                 GetTopCacheTtl(),
                 _shutdownToken);
 
@@ -1036,11 +1213,47 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
     }
 
+    private async Task ExecuteTopTkCommandAsync(PlayerSession session)
+    {
+        try
+        {
+            if (!IsCompetitiveRankingEnabledForCurrentMap())
+            {
+                QueueForSession(session, player => PrintLocalized(player, "rank.disabled"));
+                return;
+            }
+
+            var entries = await _rankService!.GetTopTeamkillsCachedAsync(
+                Config.MinimumKillsRequired,
+                Config.LeaderboardLimit,
+                GetHiddenInactiveDays(),
+                GetTopCacheTtl(),
+                _shutdownToken);
+
+            if (!IsCompetitiveRankingEnabledForCurrentMap())
+            {
+                return;
+            }
+
+            QueueForSession(session, player => OpenTopTkMenu(player, entries));
+        }
+        catch (Exception exception)
+        {
+            if (IsExpectedShutdownException(exception))
+            {
+                return;
+            }
+
+            Logger.LogError(exception, "Failed to load the teamkill top list.");
+            QueueForSession(session, player => PrintLocalized(player, "toptk.load_error"));
+        }
+    }
+
     private async Task ExecuteTopTimeCommandAsync(PlayerSession session)
     {
         try
         {
-            var entries = await _rankService!.GetTopPlaytimeCachedAsync(Config.LeaderboardLimit, GetTopCacheTtl(), _shutdownToken);
+            var entries = await _rankService!.GetTopPlaytimeCachedAsync(Config.LeaderboardLimit, GetHiddenInactiveDays(), GetTopCacheTtl(), _shutdownToken);
             QueueForSession(session, player => OpenTopTimeMenu(player, entries));
         }
         catch (Exception exception)
@@ -1100,7 +1313,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         try
         {
-            var entries = await _rankService!.GetTopWeaponCachedAsync(weapon, Config.LeaderboardLimit, GetTopCacheTtl(), _shutdownToken);
+            var entries = await _rankService!.GetTopWeaponCachedAsync(weapon, Config.LeaderboardLimit, GetHiddenInactiveDays(), GetTopCacheTtl(), _shutdownToken);
 
             if (!IsCompetitiveRankingEnabledForCurrentMap())
             {
@@ -1141,7 +1354,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         try
         {
-            var entries = await _rankService!.GetTopWeaponCategoryCachedAsync(category.Weapons, Config.LeaderboardLimit, GetTopCacheTtl(), _shutdownToken);
+            var entries = await _rankService!.GetTopWeaponCategoryCachedAsync(category.Weapons, Config.LeaderboardLimit, GetHiddenInactiveDays(), GetTopCacheTtl(), _shutdownToken);
 
             if (!IsCompetitiveRankingEnabledForCurrentMap())
             {
@@ -1256,6 +1469,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             Config.MinimumKillsRequired,
             Config.TopAnnouncementThreshold,
             Config.RankingMode,
+            GetHiddenInactiveDays(),
             _shutdownToken);
 
         if (!position.HasValue)
@@ -1286,9 +1500,18 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         });
     }
 
-    private async Task PruneNowAsync(bool showStartedMessage, string? steamIdForReply)
+    // Read on the game thread: the players connected right now must never be pruned.
+    private IReadOnlyCollection<string> GetPruneExclusions()
     {
-        if (_rankService == null || _sessionService == null || Config.PruneInactiveDays <= 0)
+        // Players still waiting for an authorized SteamID have no known id to exclude (the
+        // raw SteamID is already used for sv_lan by the session service). A player pruned in
+        // that window only loses stats that were unused for the whole prune period.
+        return _sessionService?.GetConnectedSteamIds() ?? Array.Empty<string>();
+    }
+
+    private async Task PruneNowAsync(bool showStartedMessage, string? steamIdForReply, IReadOnlyCollection<string> excludedSteamIds)
+    {
+        if (_rankService == null || _sessionService == null || Config.PruneInactiveDays <= 0 || Config.PruneMode != PruneMode.Delete)
         {
             return;
         }
@@ -1297,22 +1520,14 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         {
             var deletedPlayers = await _rankService.PruneInactivePlayersAsync(
                 Config.PruneInactiveDays,
-                _sessionService.GetConnectedSteamIds(),
+                excludedSteamIds,
                 _shutdownToken);
 
-            if (!showStartedMessage)
-            {
-                return;
-            }
+            Logger.LogInformation("Inactive player prune completed. Removed {DeletedPlayers} player(s).", deletedPlayers);
 
-            if (steamIdForReply != null)
+            if (showStartedMessage && steamIdForReply != null)
             {
                 QueueForSteamId(steamIdForReply, player => PrintLocalized(player, "prune.completed", deletedPlayers));
-            }
-            else
-            {
-                // Console/RCON callers have no session to reply to.
-                Logger.LogInformation("Inactive player prune completed. Removed {DeletedPlayers} player(s).", deletedPlayers);
             }
         }
         catch (Exception exception)
@@ -1331,14 +1546,16 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         _pruneTimer?.Kill();
         _pruneTimer = null;
 
-        if (Config.PruneInactiveDays <= 0 || Config.PruneCheckIntervalHours <= 0)
+        if (Config.PruneMode != PruneMode.Delete || Config.PruneInactiveDays <= 0 || Config.PruneCheckIntervalHours <= 0)
         {
             return;
         }
 
         _pruneTimer = AddTimer((float)(Config.PruneCheckIntervalHours * 3600.0), () =>
         {
-            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null), "scheduled prune");
+            // The timer fires on the game thread, where the connected players can be read safely.
+            var excluded = GetPruneExclusions();
+            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null, excluded), "scheduled prune");
         }, TimerFlags.REPEAT);
     }
 
@@ -1460,8 +1677,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 var position = index + 1;
                 var key = index == 0 ? "top.line.first" : "top.line.rest";
                 var text = index == 0
-                    ? Localizer.ForPlayer(player, key, entry.Name, entry.Points)
-                    : Localizer.ForPlayer(player, key, position, entry.Name, entry.Points);
+                    ? T(player, key, ShortName(entry.Name), entry.Points)
+                    : T(player, key, position, ShortName(entry.Name), entry.Points);
 
                 return new WasdMenuItem(
                     text,
@@ -1473,11 +1690,39 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             .ToList();
 
         _wasdMenuService!.Open(player, new WasdMenuPage(
-            Localizer.ForPlayer(player, "top.title"),
+            T(player, "top.title"),
             items,
-            $"{Localizer.ForPlayer(player, "top.subtitle", Localizer.ForPlayer(player, Config.RankingMode == RankingMode.Kda ? "top.mode.kda" : "top.mode.points"), Config.MinimumKillsRequired)}",
-            Localizer.ForPlayer(player, "top.empty"),
+            $"{T(player, "top.subtitle", T(player, Config.RankingMode == RankingMode.Kda ? "top.mode.kda" : "top.mode.points"), Config.MinimumKillsRequired)}",
+            T(player, "top.empty"),
             TopPlayersMenuContext));
+    }
+
+    private void OpenTopTkMenu(CCSPlayerController player, IReadOnlyList<TeamkillTopEntry> entries)
+    {
+        var items = entries
+            .Select((entry, index) =>
+            {
+                var position = index + 1;
+                var key = index == 0 ? "toptk.line.first" : "toptk.line.rest";
+                var text = index == 0
+                    ? T(player, key, ShortName(entry.Name), entry.TeamkillPercentage, entry.Teamkills, entry.Kills)
+                    : T(player, key, position, ShortName(entry.Name), entry.TeamkillPercentage, entry.Teamkills, entry.Kills);
+
+                return new WasdMenuItem(
+                    text,
+                    selectedPlayer =>
+                    {
+                        _wasdMenuService!.Push(selectedPlayer, CreateTopTkDetailPage(selectedPlayer, entry, position));
+                    });
+            })
+            .ToList();
+
+        _wasdMenuService!.Open(player, new WasdMenuPage(
+            T(player, "toptk.title"),
+            items,
+            T(player, "toptk.subtitle", Config.MinimumKillsRequired),
+            T(player, "toptk.empty"),
+            TopTeamkillsMenuContext));
     }
 
     private void OpenTopTimeMenu(CCSPlayerController player, IReadOnlyList<PlaytimeTopEntry> entries)
@@ -1489,8 +1734,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 var playtime = _playtimeService!.Format(player, entry.PlaytimeSeconds);
                 var key = index == 0 ? "toptime.line.first" : "toptime.line.rest";
                 var text = index == 0
-                    ? Localizer.ForPlayer(player, key, entry.Name, playtime)
-                    : Localizer.ForPlayer(player, key, position, entry.Name, playtime);
+                    ? T(player, key, ShortName(entry.Name), playtime)
+                    : T(player, key, position, ShortName(entry.Name), playtime);
 
                 return new WasdMenuItem(
                     text,
@@ -1502,10 +1747,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             .ToList();
 
         _wasdMenuService!.Open(player, new WasdMenuPage(
-            Localizer.ForPlayer(player, "toptime.title"),
+            T(player, "toptime.title"),
             items,
             null,
-            Localizer.ForPlayer(player, "toptime.empty"),
+            T(player, "toptime.empty"),
             TopTimeMenuContext));
     }
 
@@ -1514,7 +1759,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var categories = BuildWeaponMenuCategories(weapons);
         var items = categories
             .Select(category => new WasdMenuItem(
-                Localizer.ForPlayer(player, category.TitleKey),
+                T(player, category.TitleKey),
                 selectedPlayer =>
                 {
                     _wasdMenuService!.Push(selectedPlayer, CreateWeaponCategoryPage(selectedPlayer, steamId, category));
@@ -1522,10 +1767,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             .ToList();
 
         _wasdMenuService!.Open(player, new WasdMenuPage(
-            Localizer.ForPlayer(player, "weapon.menu.title"),
+            T(player, "weapon.menu.title"),
             items,
-            Localizer.ForPlayer(player, "weapon.menu.subtitle"),
-            Localizer.ForPlayer(player, "weapon.menu.empty"),
+            T(player, "weapon.menu.subtitle"),
+            T(player, "weapon.menu.empty"),
             TopWeaponsMenuContext));
     }
 
@@ -1534,7 +1779,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         var items = new List<WasdMenuItem>
         {
             new(
-                Localizer.ForPlayer(player, "weapon.category.top"),
+                T(player, "weapon.category.top"),
                 _ =>
                 {
                     RunBackground(() => ExecuteTopWeaponCategoryAsync(steamId, category), $"weapon category top {category.TitleKey}");
@@ -1550,10 +1795,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 })));
 
         return new WasdMenuPage(
-            Localizer.ForPlayer(player, category.TitleKey),
+            T(player, category.TitleKey),
             items,
-            Localizer.ForPlayer(player, "weapon.category.subtitle"),
-            Localizer.ForPlayer(player, "weapon.menu.empty"),
+            T(player, "weapon.category.subtitle"),
+            T(player, "weapon.menu.empty"),
             TopWeaponsMenuContext);
     }
 
@@ -1565,8 +1810,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 var position = index + 1;
                 var key = index == 0 ? "weapon.category.top.line.first" : "weapon.category.top.line.rest";
                 var text = index == 0
-                    ? Localizer.ForPlayer(player, key, entry.Name, entry.Kills)
-                    : Localizer.ForPlayer(player, key, position, entry.Name, entry.Kills);
+                    ? T(player, key, ShortName(entry.Name), entry.Kills)
+                    : T(player, key, position, ShortName(entry.Name), entry.Kills);
 
                 return new WasdMenuItem(
                     text,
@@ -1578,10 +1823,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             .ToList();
 
         _wasdMenuService!.PushIfContext(player, TopWeaponsMenuContext, new WasdMenuPage(
-            Localizer.ForPlayer(player, "weapon.category.top.title", Localizer.ForPlayer(player, category.TitleKey)),
+            T(player, "weapon.category.top.title", T(player, category.TitleKey)),
             items,
             null,
-            Localizer.ForPlayer(player, "weapon.top.empty"),
+            T(player, "weapon.top.empty"),
             TopWeaponsMenuContext));
     }
 
@@ -1593,8 +1838,8 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 var position = index + 1;
                 var key = index == 0 ? "weapon.top.line.first" : "weapon.top.line.rest";
                 var text = index == 0
-                    ? Localizer.ForPlayer(player, key, entry.Name, entry.Kills)
-                    : Localizer.ForPlayer(player, key, position, entry.Name, entry.Kills);
+                    ? T(player, key, ShortName(entry.Name), entry.Kills)
+                    : T(player, key, position, ShortName(entry.Name), entry.Kills);
 
                 return new WasdMenuItem(
                     text,
@@ -1606,39 +1851,41 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             .ToList();
 
         _wasdMenuService!.PushIfContext(player, TopWeaponsMenuContext, new WasdMenuPage(
-            Localizer.ForPlayer(player, "weapon.top.title", weapon),
+            T(player, "weapon.top.title", weapon),
             items,
             null,
-            Localizer.ForPlayer(player, "weapon.top.empty"),
+            T(player, "weapon.top.empty"),
             TopWeaponsMenuContext));
     }
 
     private void OpenResetConfirmMenu(CCSPlayerController player, string steamId)
     {
+        // Cancel comes first and is the preselected entry: pressing E by accident
+        // (the menu is also used while playing) must never confirm the reset.
         var items = new[]
         {
             new WasdMenuItem(
-                Localizer.ForPlayer(player, "reset.confirm.yes"),
+                T(player, "reset.confirm.no"),
+                selectedPlayer =>
+                {
+                    _wasdMenuService!.Close(selectedPlayer);
+                }),
+            new WasdMenuItem(
+                T(player, "reset.confirm.yes"),
                 selectedPlayer =>
                 {
                     _wasdMenuService!.Close(selectedPlayer);
                     RunBackground(() => ExecuteResetRankAsync(steamId), $"reset {steamId}");
-                }),
-            new WasdMenuItem(
-                Localizer.ForPlayer(player, "reset.confirm.no"),
-                selectedPlayer =>
-                {
-                    _wasdMenuService!.Close(selectedPlayer);
                 })
         };
 
         _wasdMenuService!.Open(player, new WasdMenuPage(
-            Localizer.ForPlayer(player, "reset.confirm.title"),
+            T(player, "reset.confirm.title"),
             items,
             // The renderer joins lines with <br> and HTML-encodes each one, so a
             // newline inside the title would render as a space: the "playtime is
             // kept" note has to be a real subtitle instead.
-            Localizer.ForPlayer(player, "reset.confirm.subtitle"),
+            T(player, "reset.confirm.subtitle"),
             contextTag: ResetRankMenuContext));
     }
 
@@ -1649,15 +1896,29 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             $"#{position} {entry.Name}",
             new[]
             {
-                InfoLine(Localizer.ForPlayer(player, "detail.points", entry.Points)),
-                InfoLine(Localizer.ForPlayer(player, "detail.kills", entry.Kills)),
-                InfoLine(Localizer.ForPlayer(player, "detail.deaths", entry.Deaths)),
-                InfoLine(Localizer.ForPlayer(player, "detail.assists", entry.Assists)),
-                InfoLine(Localizer.ForPlayer(player, "detail.kda", entry.Kda)),
-                InfoLine(Localizer.ForPlayer(player, "detail.playtime", playtime))
+                InfoLine(T(player, "detail.points", entry.Points)),
+                InfoLine(T(player, "detail.kills", entry.Kills)),
+                InfoLine(T(player, "detail.deaths", entry.Deaths)),
+                InfoLine(T(player, "detail.assists", entry.Assists)),
+                InfoLine(T(player, "detail.kda", entry.Kda)),
+                InfoLine(T(player, "detail.playtime", playtime))
             },
-            Localizer.ForPlayer(player, "top.title"),
+            T(player, "top.title"),
             contextTag: TopPlayersMenuContext);
+    }
+
+    private WasdMenuPage CreateTopTkDetailPage(CCSPlayerController player, TeamkillTopEntry entry, int position)
+    {
+        return new WasdMenuPage(
+            $"#{position} {entry.Name}",
+            new[]
+            {
+                InfoLine(T(player, "detail.kills", entry.Kills)),
+                InfoLine(T(player, "detail.teamkills", entry.Teamkills)),
+                InfoLine(T(player, "detail.teamkill_ratio", entry.TeamkillPercentage))
+            },
+            T(player, "toptk.title"),
+            contextTag: TopTeamkillsMenuContext);
     }
 
     private WasdMenuPage CreateTopPlaytimeDetailPage(CCSPlayerController player, PlaytimeTopEntry entry, int position)
@@ -1667,9 +1928,9 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             $"#{position} {entry.Name}",
             new[]
             {
-                InfoLine(Localizer.ForPlayer(player, "detail.playtime", playtime))
+                InfoLine(T(player, "detail.playtime", playtime))
             },
-            Localizer.ForPlayer(player, "toptime.title"),
+            T(player, "toptime.title"),
             contextTag: TopTimeMenuContext);
     }
 
@@ -1679,10 +1940,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             $"#{position} {entry.Name}",
             new[]
             {
-                InfoLine(Localizer.ForPlayer(player, "detail.weapon", weapon)),
-                InfoLine(Localizer.ForPlayer(player, "detail.kills", entry.Kills))
+                InfoLine(T(player, "detail.weapon", weapon)),
+                InfoLine(T(player, "detail.kills", entry.Kills))
             },
-            Localizer.ForPlayer(player, "weapon.top.title", weapon),
+            T(player, "weapon.top.title", weapon),
             contextTag: TopWeaponsMenuContext);
     }
 
@@ -1692,10 +1953,10 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
             $"#{position} {entry.Name}",
             new[]
             {
-                InfoLine(Localizer.ForPlayer(player, "detail.category", Localizer.ForPlayer(player, category.TitleKey))),
-                InfoLine(Localizer.ForPlayer(player, "detail.kills", entry.Kills))
+                InfoLine(T(player, "detail.category", T(player, category.TitleKey))),
+                InfoLine(T(player, "detail.kills", entry.Kills))
             },
-            Localizer.ForPlayer(player, "weapon.category.top.title", Localizer.ForPlayer(player, category.TitleKey)),
+            T(player, "weapon.category.top.title", T(player, category.TitleKey)),
             contextTag: TopWeaponsMenuContext);
     }
 
@@ -1781,9 +2042,68 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         return true;
     }
 
+    // Names in the leaderboard rows are cut so a long name cannot push the score out of the line.
+    private static string ShortName(string name)
+    {
+        return name.Length <= LeaderboardNameCharacters
+            ? name
+            : StringSanitizer.Truncate(name, LeaderboardNameCharacters - 3) + "...";
+    }
+
+    /// <summary>
+    /// Localized text for a player. A server language without a lang file (de, fr, tr...)
+    /// would show the raw keys, so a missing translation falls back to lang/en.json.
+    /// </summary>
+    private string T(CCSPlayerController? player, string key, params object[] args)
+    {
+        var text = args.Length == 0
+            ? Localizer.ForPlayer(player, key)
+            : Localizer.ForPlayer(player, key, args);
+
+        // CounterStrikeSharp returns the key itself when no culture has the string.
+        if (!string.Equals(text, key, StringComparison.Ordinal) ||
+            _englishFallback == null ||
+            !_englishFallback.TryGetValue(key, out var english))
+        {
+            return text;
+        }
+
+        // Color tags are resolved in the template before the arguments go in, so a player
+        // name such as "{red}" is never read as a color. Formatted with the current
+        // culture, which is what CounterStrikeSharp's localizer uses.
+        var template = english.ReplaceColorTags();
+
+        try
+        {
+            return args.Length == 0 ? template : string.Format(template, args);
+        }
+        catch (FormatException)
+        {
+            return template;
+        }
+    }
+
+    private void LoadEnglishFallback()
+    {
+        _englishFallback = null;
+
+        try
+        {
+            var path = Path.Combine(ModuleDirectory, "lang", "en.json");
+            if (File.Exists(path))
+            {
+                _englishFallback = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+            }
+        }
+        catch (Exception exception)
+        {
+            Logger.LogWarning(exception, "Could not read lang/en.json; missing translations will show their keys.");
+        }
+    }
+
     private void PrintLocalized(CCSPlayerController player, string key, params object[] args)
     {
-        player.PrintToChat(Localizer.ForPlayer(player, key, args));
+        player.PrintToChat(T(player, key, args));
     }
 
     private void BroadcastLocalized(string key, params object[] args)
@@ -1795,7 +2115,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         foreach (var player in players)
         {
-            player.PrintToChat(Localizer.ForPlayer(player, key, args));
+            player.PrintToChat(T(player, key, args));
         }
     }
 
@@ -1858,6 +2178,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         AddCommand("css_rank", "Show your rank stats.", OnRankCommand);
         AddCommand("css_top", "Show the top ranked players.", OnTopCommand);
         AddCommand("css_toptime", "Show the top playtime leaderboard.", OnTopTimeCommand);
+        AddCommand("css_toptk", "Show the players with the highest teamkill ratio.", OnTopTkCommand);
         AddCommand("css_topweapons", "Open the weapon leaderboard menu.", OnTopWeaponsCommand);
         AddCommand("css_toparmas", "Open the weapon leaderboard menu.", OnTopWeaponsCommand);
         AddCommand("css_resetrank", "Reset your rank stats.", OnResetRankCommand);
@@ -1876,6 +2197,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         RegisterListener<Listeners.OnServerPrecacheResources>(OnServerPrecacheResources);
         RegisterListener<Listeners.OnTick>(OnTick);
         RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
+        RegisterListener<Listeners.OnGameServerSteamAPIDeactivated>(OnGameServerSteamAPIDeactivated);
     }
 
     private void OnCompetitiveEnabledCvarChanged(object? sender, bool enabled)
@@ -1891,6 +2213,7 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
     private void CloseCompetitiveRankMenus()
     {
         _wasdMenuService?.CloseByContext(TopPlayersMenuContext);
+        _wasdMenuService?.CloseByContext(TopTeamkillsMenuContext);
         _wasdMenuService?.CloseByContext(TopWeaponsMenuContext);
         _wasdMenuService?.CloseByContext(ResetRankMenuContext);
     }
@@ -2132,6 +2455,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
                 continue;
             }
 
+            // Only players who were on this team when the round started.
+            if (!_roundParticipation.CountsForRound(TryGetStorageSteamId(player), team))
+            {
+                continue;
+            }
+
             var won = team == winnerTeam;
             var points = won ? Config.Points.TeamWin : -Config.Points.TeamLossPenalty;
 
@@ -2159,6 +2488,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
 
         foreach (var player in players)
         {
+            // Only players who played at least one round of this match on the team they finish on.
+            if (!_roundParticipation.CountsForMatch(TryGetStorageSteamId(player), player.TeamNum))
+            {
+                continue;
+            }
+
             var result = (CsTeam)player.TeamNum switch
             {
                 CsTeam.CounterTerrorist => counterTerroristResult,
@@ -2282,6 +2617,12 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         }
 
         return value;
+    }
+
+    // Days after which a player drops out of the lists in Hide mode, 0 when nothing is hidden.
+    private int GetHiddenInactiveDays()
+    {
+        return Config.PruneMode == PruneMode.Hide && Config.PruneInactiveDays > 0 ? Config.PruneInactiveDays : 0;
     }
 
     private TimeSpan GetTopCacheTtl()
@@ -2501,6 +2842,13 @@ public sealed class UmbrellaRankedPlugin : BasePlugin, IPluginConfig<UmbrellaRan
         foreach (var player in players)
         {
             StartPlayerLoad(player);
+        }
+
+        if (_startupPrunePending)
+        {
+            _startupPrunePending = false;
+            var excluded = GetPruneExclusions();
+            RunBackground(() => PruneNowAsync(showStartedMessage: false, steamIdForReply: null, excluded), "initial prune");
         }
     }
 

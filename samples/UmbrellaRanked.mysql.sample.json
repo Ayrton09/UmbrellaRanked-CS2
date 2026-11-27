@@ -13,6 +13,7 @@
     "deathrun_*"
   ],
   "RankingMode": "Points",
+  "BotKillPoints": true,
   "Points": {
     "Kill": 2,
     "HeadshotBonus": 1,
@@ -37,6 +38,7 @@
   "CommandCooldownSeconds": 3.0,
   "AutosaveIntervalSeconds": 120.0,
   "PruneInactiveDays": 35,
+  "PruneMode": "Delete",
   "PruneOnStartup": false,
   "PruneCheckIntervalHours": 6.0,
   "AllowResetRank": true,
@@ -52,7 +54,8 @@
     "Password": "replace-with-a-real-password",
     "ConnectionTimeoutSeconds": 15,
     "MinimumPoolSize": 0,
-    "MaximumPoolSize": 50
+    "MaximumPoolSize": 50,
+    "SslMode": "Preferred"
   },
   "Sqlite": {
     "FilePath": "data/umbrella_ranked.sqlite",

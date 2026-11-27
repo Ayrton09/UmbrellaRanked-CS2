@@ -39,13 +39,13 @@
 
 ## What it does
 
-Umbrella Ranked keeps a persistent ranking for the real players of a CS2 server. Every kill, death, assist, headshot, MVP, round and match is tracked in memory while the player is connected and saved to a database. Players check their position with `!rank` and browse the leaderboards (points or KDA, playtime, per-weapon) in an in-game WASD menu, with no extra client files. Bots are never ranked.
+Umbrella Ranked keeps a persistent ranking for the real players of a CS2 server. Every kill, death, assist, headshot, MVP, teamkill, round and match is tracked in memory while the player is connected and saved to a database. Players check their position with `!rank` and browse the leaderboards (points or KDA, playtime, per-weapon) in an in-game WASD menu, with no extra client files. Bots are never ranked.
 
 ## Features
 
 |  | |
 | --- | --- |
-| **Stats** | Kills, deaths, assists, headshots, MVPs, KDA, points, playtime, rounds and matches won or lost, rounds per side (CT and T), and per-weapon kills and headshots |
+| **Stats** | Kills, deaths, assists, headshots, MVPs, teamkills, KDA, points, playtime, rounds and matches won or lost, rounds per side (CT and T), and per-weapon kills and headshots |
 | **Ranking** | Two modes, `Points` or `Kda`, with a full tie-breaker chain so positions are stable. Players appear in the lists once they reach `MinimumKillsRequired` |
 | **Web panel friendly** | Players are keyed by SteamID64, the format web panels and other plugins use. Older Steam2 rows are converted automatically |
 | **Storage** | MySQL / MariaDB or SQLite, chosen explicitly through `DatabaseMode`. No silent fallback: a misconfigured backend refuses to load instead of quietly losing data |
@@ -122,7 +122,24 @@ Replace the plugin folder contents with the new release (keep `data/` if you use
 > When updating, extract only `addons/counterstrikesharp/plugins/umbrellaranked/`, or skip `configs/` when the archive asks to overwrite. Extracting the whole archive over an existing install replaces your config, database password included.
 
 > [!IMPORTANT]
-> Always replace `lang/` too. Missing keys fall back to the raw key name in chat.
+> Always replace `lang/` too. A server language without its own file (German, French, Turkish...) falls back to the English texts, but a key missing from every file shows its raw name in chat.
+
+**From 1.3.x to 1.4.0**
+
+- Replace `lang/`: `rank.details` changed and new keys were added (`toptk.*`, `detail.teamkills`, `detail.teamkill_ratio`, `prune.hide_mode`).
+- A `teamkills` column is added to `ur_cs2_player_stats` automatically on the first start. Existing players start at `0`, because older teamkills were never stored.
+- New `PruneMode` setting. `Delete` is the default and behaves exactly as before; `Hide` keeps inactive players in the database and only hides them from the rankings. See [Persistence and maintenance](#persistence-and-maintenance).
+- New `toptk` command with the leaderboard of the highest teamkill ratio.
+- If several servers share one MySQL database, update all of them together: a 1.3.0 server does not write or reset `teamkills`.
+- New `BotKillPoints` setting (default `true`, nothing changes). With `false`, killing a bot still counts the kill, headshot and weapon stats but is worth no points, and an assist on a bot kill is worth no points either. See [Points](#points).
+- New `MySql.SslMode` setting (default `Preferred`, nothing changes). See [Database](#database).
+- Round and match results (`TeamWin`, `TeamLossPenalty`, rounds and matches won or lost) now only count for players who were on a team when the freeze time ended. See [Points](#points).
+- Stats are flushed when the server shuts down or restarts, not only on a plugin unload.
+- `PruneInactiveDays` accepts at most `3650`. The prune now deletes in batches of 5000, so a huge backlog no longer times out. `PruneOnStartup` now leaves out the players who are already connected.
+- The reset confirmation menu now starts on Cancel.
+- Unknown `RankingMode`, `Top1Sound.PlaybackMode` or `MySql.SslMode` values log a warning and fall back to the default instead of stopping the plugin from loading.
+- Several servers starting together against one MySQL database no longer collide while updating the tables.
+- Built against CounterStrikeSharp `1.0.381`, it still loads on `1.0.380`. MySqlConnector was updated to 3.0.
 
 **From 1.2.x to 1.3.0**
 
@@ -152,13 +169,14 @@ Each command works as `!cmd`, `/cmd` (the `css_` console command) and as a plain
 
 | Command | Description |
 | --- | --- |
-| `rank` | Show your position, points, K/D/A, KDA, playtime, headshot percentage and MVPs |
+| `rank` | Show your position, points, K/D/A, KDA, playtime, headshot percentage, MVPs, teamkills and teamkill percentage |
 | `top` | Open the points or KDA leaderboard |
 | `toptime` | Open the playtime leaderboard |
+| `toptk` | Open the leaderboard of the highest teamkill ratio (teamkills / kills), from `MinimumKillsRequired` kills |
 | `topweapons` · `toparmas` | Open the per-weapon leaderboard menu |
 | `resetrank` · `rrank` | Reset your own stats, with a confirmation prompt |
 
-`rank`, `top`, `topweapons` and `resetrank` answer "competitive ranking is disabled" while ranking is paused (see [Troubleshooting](#troubleshooting-and-faq)); `toptime` always works.
+`rank`, `top`, `toptk`, `topweapons` and `resetrank` answer "competitive ranking is disabled" while ranking is paused (see [Troubleshooting](#troubleshooting-and-faq)); `toptime` always works.
 
 ### Admins
 
@@ -167,7 +185,7 @@ Both require the `@css/root` permission and also work from the server console.
 | Command | Description |
 | --- | --- |
 | `css_rank_status` | Print backend, session, cache and autosave diagnostics |
-| `css_rank_prunenow` | Run the inactive-player prune immediately. Tells you when `PruneInactiveDays` is `0` instead of doing nothing silently |
+| `css_rank_prunenow` | Run the inactive-player prune immediately. Tells you when `PruneInactiveDays` is `0` instead of doing nothing silently. In `Hide` mode it only replies that nothing is deleted |
 
 ### Console variable
 
@@ -199,7 +217,8 @@ Start from [`samples/UmbrellaRanked.mysql.sample.json`](samples/UmbrellaRanked.m
 | --- | --- | --- | --- |
 | `Enabled` | `true` | | Master switch for competitive ranking |
 | `DatabaseMode` | `MySql` | `MySql` or `Sqlite` | Storage backend |
-| `RankingMode` | `Points` | `Points` or `Kda` | How the leaderboards are ordered |
+| `RankingMode` | `Points` | `Points` or `Kda` | How the leaderboards are ordered. An unknown value logs a warning and falls back to `Points` |
+| `BotKillPoints` | `true` | | `false` makes kills and assists on bots worth no points. They still count in the kill, headshot, weapon and assist stats. What a human loses when a bot kills them does not change |
 | `MinimumKillsRequired` | `100` | at least `100` | Kills needed to appear in ranked lists and to get a position |
 | `MinimumPlayersForStats` | `4` | at least `1` | Real players connected before competitive stats count |
 | `DisabledRankMapPatterns` | surf / mg / bhop / jb / dr / deathrun | `*` wildcard | Map patterns where competitive ranking pauses. Matched against the full map name and its last path segment, case-insensitive |
@@ -215,11 +234,14 @@ Start from [`samples/UmbrellaRanked.mysql.sample.json`](samples/UmbrellaRanked.m
 | Setting | Default | Limits | Description |
 | --- | --- | --- | --- |
 | `AutosaveIntervalSeconds` | `120.0` | `0` or at least `10` | Periodic save interval. `0` disables the periodic save (disconnect, map end and unload still save) |
-| `PruneInactiveDays` | `35` | `0` or at least `35` | Delete players unseen for this many days. `0` disables pruning |
+| `PruneInactiveDays` | `35` | `0` or `35` to `3650` | Delete or hide (see `PruneMode`) players unseen for this many days. `0` disables both |
+| `PruneMode` | `Delete` | `Delete` or `Hide` | `Delete` removes inactive players from the database. `Hide` keeps them and only leaves them out of `top`, `toptime`, `topweapons`, `toptk`, the join announcement and the position in `rank` |
 | `PruneOnStartup` | `false` | | Run a prune when the plugin loads |
 | `PruneCheckIntervalHours` | `6.0` | `0` or at least `0.1` | Scheduled prune interval. `0` disables the schedule |
 
 Pruning never touches players who are currently connected, and clears the leaderboard cache when it removes rows.
+
+In `Hide` mode the scheduled prune and `PruneOnStartup` do nothing, and a hidden player shows up again on their next save, as soon as they join and play. An unknown `PruneMode` value logs a warning and falls back to `Delete`.
 
 ### Database
 
@@ -234,7 +256,8 @@ MySQL requires `Host`, `Database` and `Username`, otherwise the plugin refuses t
   "Password": "your-password",
   "ConnectionTimeoutSeconds": 15,
   "MinimumPoolSize": 0,
-  "MaximumPoolSize": 50
+  "MaximumPoolSize": 50,
+  "SslMode": "Preferred"
 }
 ```
 
@@ -243,6 +266,9 @@ MySQL requires `Host`, `Database` and `Username`, otherwise the plugin refuses t
 | `ConnectionTimeoutSeconds` | `15` | `0` resets to `15` |
 | `MinimumPoolSize` | `0` | cannot exceed `MaximumPoolSize` |
 | `MaximumPoolSize` | `50` | `0` resets to `50` |
+| `SslMode` | `Preferred` | `None`, `Preferred`, `Required`, `VerifyCA` or `VerifyFull` |
+
+`SslMode` is the TLS policy of the connection. `Preferred` (the default and the behavior of earlier versions) uses TLS when the server offers it and silently falls back to plain text otherwise. `Required`, `VerifyCA` and `VerifyFull` force TLS and refuse to connect without it, which is what you want when the database is on another host; the last two also validate the server certificate. An unknown value logs a warning and falls back to `Preferred`.
 
 SQLite only needs a path, resolved relative to the plugin directory when it is not absolute.
 
@@ -325,6 +351,10 @@ With the defaults above:
 | Round MVP, bomb planted, defused or exploded, hostage rescued | the matching value | none |
 | Round won or lost | `+1` for each player on the winning team, `-1` for each on the losing team | |
 
+`BotKillPoints` (a general setting, default `true`) decides whether killing a bot pays. With `false` the kill, `HeadshotBonus`, `KnifeKillBonus` and `TaserKillBonus` are worth `0` for the attacker, and an assist on a bot kill is worth `0`, but the kill, headshot, weapon and assist counters still go up. A human killed by a bot loses points as usual.
+
+Round and match results only count for players who actually played. When the freeze time ends the plugin remembers who is on the Terrorist or Counter-Terrorist team; at the end of the round only those players, and only while they are still on the same team, get the round points and the `rounds_won`, `rounds_lost`, `rounds_ct` and `rounds_t` stats. Switching to the winning team after dying, moving to spectator to dodge a loss, or joining late earns nothing. A match result (`matches_won`, `matches_lost`, `matches_tied`) only counts for players who played at least one round of the match on the team they finish on. If the plugin was loaded in the middle of a round or match there is nothing to compare against, so everybody on a team counts until the next round starts.
+
 The hostage and bomb handling values are `0` (off) by default. Set them to turn them on:
 
 | Setting | Who | When |
@@ -357,6 +387,7 @@ Stats are keyed by the player's **authorized** SteamID64, the one Steam has vali
 [Umbrella Ranked] Status
 Backend: Sqlite | Config: on | CVar: on | Competitive: on | Mode: Points
 Map: de_dust2 | Map blocked: no
+Prune: Delete | Inactive days: 35
 Players: connected 12, loaded 12, loading 0, sessions 12
 Pending saves: 3 | Autosave: on | Menus: 1
 Top cache: 4 entries | TTL: 20s | Last refresh: 2026-08-27 01:14:02 UTC
@@ -414,6 +445,7 @@ Two tables, both using the fixed `ur_cs2_` prefix:
 | `name` | Last known name |
 | `kills`, `deaths`, `assists`, `points` | Ranking stats |
 | `headshots`, `mvps` | Headshot kills and round MVP awards |
+| `teamkills` | Teammates killed (a teammate bot counts); not included in `kills` |
 | `rounds_won`, `rounds_lost` | Rounds that ended with the player on the winning or the losing side |
 | `rounds_ct`, `rounds_t` | Rounds the player finished as CT or as T |
 | `matches_won`, `matches_lost`, `matches_tied` | Match results, taken from the final score (a surrender counts as a loss for the team that surrendered) |
@@ -422,7 +454,7 @@ Two tables, both using the fixed `ur_cs2_` prefix:
 
 Rounds and matches are only counted while competitive ranking is active, never during warmup, and not at all in free-for-all modes (`mp_teammates_are_enemies 1`), where the T and CT sides mean nothing.
 
-Resetting a rank clears every stat and the weapon stats but **preserves playtime**. Pruning deletes inactive players from both tables. Both clear the leaderboard cache.
+Resetting a rank clears every stat and the weapon stats but **preserves playtime**. Pruning deletes inactive players from both tables (in `Hide` mode nothing is deleted, the rows are only left out of the lists). Both clear the leaderboard cache.
 
 ## Building from source
 

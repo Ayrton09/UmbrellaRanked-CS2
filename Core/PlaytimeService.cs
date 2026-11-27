@@ -1,16 +1,14 @@
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Core.Translations;
-using Microsoft.Extensions.Localization;
 
 namespace UmbrellaRanked.Core;
 
 public sealed class PlaytimeService
 {
-    private readonly IStringLocalizer _localizer;
+    private readonly Func<CCSPlayerController?, string, object[], string> _translate;
 
-    public PlaytimeService(IStringLocalizer localizer)
+    public PlaytimeService(Func<CCSPlayerController?, string, object[], string> translate)
     {
-        _localizer = localizer;
+        _translate = translate;
     }
 
     public string Format(CCSPlayerController? player, int totalSeconds)
@@ -21,7 +19,7 @@ public sealed class PlaytimeService
         var minutes = (remaining % 3600) / 60;
 
         return days > 0
-            ? _localizer.ForPlayer(player, "time.format.days", days, hours, minutes)
-            : _localizer.ForPlayer(player, "time.format", hours, minutes);
+            ? _translate(player, "time.format.days", [days, hours, minutes])
+            : _translate(player, "time.format", [hours, minutes]);
     }
 }

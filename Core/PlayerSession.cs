@@ -4,6 +4,8 @@ namespace UmbrellaRanked.Core;
 
 public sealed class PlayerSession
 {
+    private const int MaxCreditedElapsedSeconds = 86400;
+
     private readonly object _sync = new();
     private readonly Dictionary<string, WeaponCounters> _weaponStats = new(StringComparer.Ordinal);
 
@@ -20,10 +22,12 @@ public sealed class PlayerSession
     private int _matchesWon;
     private int _matchesLost;
     private int _matchesTied;
+    private int _teamkills;
     private int _persistedPlaytimeSeconds;
     private int _lastResetUnixTime;
     private DateTimeOffset _playtimeAnchorUtc;
     private bool _hasPendingSave;
+    private bool _evicted;
     private long _version;
     private readonly SemaphoreSlim _persistenceLock = new(1, 1);
     private int _loadFailures;
@@ -123,6 +127,26 @@ public sealed class PlayerSession
         }
     }
 
+    /// <summary>
+    /// Attach that refuses a session already evicted from the service: the eviction and
+    /// this check happen under the same lock, so a session is never attached after it
+    /// was removed. The caller then creates a fresh session.
+    /// </summary>
+    public bool TryAttach(PlayerIdentity identity, DateTimeOffset nowUtc, out bool newlyConnected)
+    {
+        lock (_sync)
+        {
+            if (_evicted)
+            {
+                newlyConnected = false;
+                return false;
+            }
+
+            newlyConnected = Attach(identity, nowUtc);
+            return true;
+        }
+    }
+
     public bool Attach(PlayerIdentity identity, DateTimeOffset nowUtc)
     {
         lock (_sync)
@@ -168,6 +192,7 @@ public sealed class PlayerSession
             _matchesWon = stats?.MatchesWon ?? 0;
             _matchesLost = stats?.MatchesLost ?? 0;
             _matchesTied = stats?.MatchesTied ?? 0;
+            _teamkills = stats?.Teamkills ?? 0;
             _persistedPlaytimeSeconds = Math.Max(0, (stats?.PlaytimeSeconds ?? 0) + pendingPlaytimeSeconds);
             _lastResetUnixTime = stats?.LastResetUnixTime ?? 0;
             _weaponStats.Clear();
@@ -259,6 +284,23 @@ public sealed class PlayerSession
 
             _mvps++;
             _points = AddPointsUnsafe(points);
+            MarkDirtyUnsafe();
+            return true;
+        }
+    }
+
+    // Unlike TryApplyPoints this counts even when the penalty is 0.
+    public bool TryApplyTeamKill(int penaltyPoints)
+    {
+        lock (_sync)
+        {
+            if (!IsLoaded || IsResetInProgress)
+            {
+                return false;
+            }
+
+            _teamkills++;
+            _points = AddPointsUnsafe(-penaltyPoints);
             MarkDirtyUnsafe();
             return true;
         }
@@ -410,6 +452,7 @@ public sealed class PlayerSession
                 MatchesWon = _matchesWon,
                 MatchesLost = _matchesLost,
                 MatchesTied = _matchesTied,
+                Teamkills = _teamkills,
                 PlaytimeSeconds = GetEffectivePlaytimeSecondsUnsafe(nowUtc),
                 LastSeenUnixTime = (int)nowUtc.ToUnixTimeSeconds(),
                 LastResetUnixTime = _lastResetUnixTime
@@ -447,6 +490,7 @@ public sealed class PlayerSession
                 _matchesWon,
                 _matchesLost,
                 _matchesTied,
+                _teamkills,
                 GetEffectivePlaytimeSecondsUnsafe(nowUtc),
                 (int)nowUtc.ToUnixTimeSeconds(),
                 _lastResetUnixTime,
@@ -468,7 +512,12 @@ public sealed class PlayerSession
 
             // Advance the anchor by exactly the whole seconds that were credited so
             // the sub-second remainder carries over instead of being lost per save.
-            _playtimeAnchorUtc = IsConnected && _playtimeAnchorUtc != default
+            // When more than the cap had passed (no successful save for a day), only
+            // the cap was credited: the anchor jumps to the capture time so the rest is
+            // not credited again by the next save.
+            var gapWasCapped = _playtimeAnchorUtc != default &&
+                (capturedAtUtc - _playtimeAnchorUtc).TotalSeconds >= MaxCreditedElapsedSeconds;
+            _playtimeAnchorUtc = IsConnected && _playtimeAnchorUtc != default && !gapWasCapped
                 ? _playtimeAnchorUtc.AddSeconds(creditedSeconds)
                 : capturedAtUtc;
 
@@ -533,6 +582,7 @@ public sealed class PlayerSession
             _matchesWon = 0;
             _matchesLost = 0;
             _matchesTied = 0;
+            _teamkills = 0;
             _weaponStats.Clear();
             _persistedPlaytimeSeconds = snapshot.PlaytimeSeconds;
             _lastResetUnixTime = snapshot.ResetUnixTime;
@@ -555,8 +605,31 @@ public sealed class PlayerSession
     {
         lock (_sync)
         {
-            return !IsConnected && !IsLoading && !IsResetInProgress && !_hasPendingSave;
+            return CanBeRemovedUnsafe();
         }
+    }
+
+    /// <summary>
+    /// Atomically checks that the session can be removed and flags it as evicted, so a
+    /// concurrent <see cref="TryAttach"/> cannot revive a session that is being removed.
+    /// </summary>
+    public bool TryMarkEvicted()
+    {
+        lock (_sync)
+        {
+            if (!CanBeRemovedUnsafe())
+            {
+                return false;
+            }
+
+            _evicted = true;
+            return true;
+        }
+    }
+
+    private bool CanBeRemovedUnsafe()
+    {
+        return !IsConnected && !IsLoading && !IsResetInProgress && !_hasPendingSave;
     }
 
     private int GetEffectivePlaytimeSecondsUnsafe(DateTimeOffset nowUtc)
@@ -571,8 +644,10 @@ public sealed class PlayerSession
             return 0;
         }
 
-        var elapsedSeconds = (int)(nowUtc - _playtimeAnchorUtc).TotalSeconds;
-        return elapsedSeconds > 0 && elapsedSeconds < 86400 ? elapsedSeconds : 0;
+        // Capped instead of discarded: after a day without a successful save the player
+        // still gets the cap, and the anchor moves with it so later saves keep counting.
+        var elapsedSeconds = (int)Math.Min((nowUtc - _playtimeAnchorUtc).TotalSeconds, MaxCreditedElapsedSeconds);
+        return elapsedSeconds > 0 ? elapsedSeconds : 0;
     }
 
     private int GetPreLoadPlaytimeSecondsUnsafe(DateTimeOffset nowUtc)
